@@ -542,6 +542,13 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
 </script>
 </head>
 <body>
+<script>
+/* ---- 挂载前缀（Path Prefix Rewrite）----
+   服务端渲染看板时把 JSON 字面量替换进 QD_BASE_PREFIX（"" = 未挂载）。
+   所有面板请求必须经 api_url() 拼前缀：反代把 /qoder/* 整段转过来时，
+   绝对路径 fetch("/settings") 会被浏览器解析到站点根，前缀丢失 → 404。 */
+window.QD_BASE_PREFIX = "/*__QD_PREFIX__*/";
+</script>
 <header>
   <div class="header-left" style="display:flex;align-items:center;gap:18px;flex-wrap:wrap">
     <h1><span class="dot" id="statusDot"></span>Qoder 网关看板
@@ -2546,6 +2553,15 @@ function usableKey(value){
   return value && /^[\x20-\x7e]+$/.test(value) ? value : '';
 }
 
+// 挂载前缀拼接：window.QD_BASE_PREFIX 由服务端渲染时注入（JSON 字面量，见 _dashboard）。
+// 桩环境（测试）没注入时按未挂载处理。全部面板请求统一走这里，绝不手写绝对路径。
+function api_url(path){
+  path = String(path || "");
+  const base = (typeof window !== 'undefined' && window.QD_BASE_PREFIX) || '';
+  if(!base) return path;
+  return path.charAt(0) === '/' ? base + path : path;
+}
+
 function authHeaders(base){
   const h = Object.assign({}, base || {});
   const key = usableKey(API_KEY);
@@ -2564,8 +2580,7 @@ function authHeaders(base){
 //                       （postJSON 已 await r.text()，此处若再 r.json() 会抛 body stream already read）
 //   · 未传 parsedBody ⇒ 视为「流未被消费」：403 分支由本函数 await r.json() 兜底
 //                       （getJSON / downloadExport 走这条，它们在状态判定前不读 body）
-async function throwPanelAuthError(r, parsedBody){
-  if(r.status === 401){
+async function throwPanelAuthError(r, parsedBody){  if(r.status === 401){
     panelNeedsLogin();
     throw new Error('unauthorized');
   }
@@ -2580,7 +2595,7 @@ async function throwPanelAuthError(r, parsedBody){
 }
 
 async function getJSON(url){
-  const r = await fetch(url, {cache:'no-store', headers: authHeaders()});
+  const r = await fetch(api_url(url), {cache:'no-store', headers: authHeaders()});
   await throwPanelAuthError(r);
   if(!r.ok) throw new Error(r.status);
   // #26 契约冻结：出口相关的响应头只在 chat 类请求且自动换区时出现，管理端点永不带（读到只会是旧进程残留），
@@ -2588,7 +2603,7 @@ async function getJSON(url){
   return r.json();
 }
 async function postJSON(url, body){
-  const r = await fetch(url, {method:'POST', headers: authHeaders({'Content-Type':'application/json'}),
+  const r = await fetch(api_url(url), {method:'POST', headers: authHeaders({'Content-Type':'application/json'}),
                               body: JSON.stringify(body || {})});
   const t = await r.text();
   let parsed = {};
@@ -2933,7 +2948,7 @@ async function downloadExport(query, fallbackLabel){
   // Fetch through the authorised JSON API and save the blob client-side.
   // A plain <a href> would not carry the X-Panel-Token header, so a
   // password-only session would be rejected.
-  const r = await fetch('/accounts/export' + (query || ''), {cache:'no-store', headers: authHeaders()});
+  const r = await fetch(api_url('/accounts/export') + (query || ''), {cache:'no-store', headers: authHeaders()});
   await throwPanelAuthError(r);
   if(r.status === 404){
     let msg = '账号不存在';
@@ -3675,7 +3690,7 @@ async function submitPanelLogin(){
   if(!password){ if(msg) msg.textContent = '请输入面板密码'; return; }
   if(msg) msg.textContent = '';
   try {
-    const r = await fetch('/panel/login', {
+    const r = await fetch(api_url('/panel/login'), {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({password: password})
@@ -3711,7 +3726,7 @@ async function panelLogout(){
 
 async function bootPanel(){
   try {
-    const r = await fetch('/panel/status', {cache: 'no-store', headers: authHeaders()});
+    const r = await fetch(api_url('/panel/status'), {cache: 'no-store', headers: authHeaders()});
     PANEL_STATUS = await r.json().catch(() => ({}));
   } catch(e) { PANEL_STATUS = {}; }
   const hint = document.getElementById('panelDefaultHint');
@@ -4235,8 +4250,9 @@ async function saveLimits(btn){
 }
 
 /* ---- 路径前缀重写：挂在别的网站子路径下（/qoder/v1/... 按 /v1/... 处理）----
-   后端每请求现读配置，保存即生效；本页的 AJAX 全部是相对路径 fetch，
-   若当前就是从前缀路径进来的，保存后刷新依旧命中同一前缀。 */
+   后端每请求现读配置，保存即生效；本页所有请求都经 api_url() 自动带上
+   QD_BASE_PREFIX（服务端渲染时注入），所以改完前缀后刷新页面即可继续使用，
+   旧会话 token 也仍然有效。 */
 function renderPathPrefix(prefix){
   const input = document.getElementById('setPathPrefix');
   const stateEl = document.getElementById('setPrefixState');

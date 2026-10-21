@@ -129,6 +129,11 @@ try:
     check("W0 基线：未配置前缀时 /ping 正常（行为不变）",
           code == 200 and "pong" in text, (code, text[:40]))
 
+    code, text, _ = _get("/")
+    check("W0b 未配置时看板注入 QD_BASE_PREFIX=''（前端拼接退化为原路径）",
+          code == 200 and 'window.QD_BASE_PREFIX = ""' in text,
+          [ln for ln in text.splitlines() if "QD_BASE_PREFIX" in ln][:1])
+
     P.ACCOUNTS_DIR = _G
     S.set_path_prefix(_G, "qoder")
 
@@ -151,6 +156,13 @@ try:
     code, text, _ = _get("/qoder")
     check("W4b 精确前缀 /qoder -> 重写为 / -> 200 HTML",
           code == 200 and "<html" in text.lower(), (code, text[:60]))
+
+    # 看板注入：前缀路径下打开看板，QD_BASE_PREFIX 必须是 JSON 字符串字面量，
+    # 否则页面里所有绝对路径 fetch（/panel/login 等）都会丢前缀 -> 登录 404。
+    code, text, _ = _get("/qoder/")
+    check("W9 前缀路径看板注入 QD_BASE_PREFIX='/qoder'（JSON 字面量）",
+          code == 200 and 'window.QD_BASE_PREFIX = "/qoder"' in text,
+          [ln for ln in text.splitlines() if "QD_BASE_PREFIX" in ln][:1])
 
     code, resp = _options("/qoder/v1/chat/completions")
     check("W5 OPTIONS 带前缀：前缀先剥再判 CORS -> 204 + ACAO 头",

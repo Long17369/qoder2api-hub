@@ -8463,6 +8463,12 @@ class Handler(BaseHTTPRequestHandler):
                 body = fh.read()
         except Exception as exc:
             return self._error(500, "dashboard.html unavailable: %s" % exc)
+        # 挂载前缀：替换模板标记为 JSON 字面量（引号安全，任何值都逃不出字符串），
+        # 前端所有请求经 api_url() 统一拼上这个前缀。
+        prefix = qoder_settings.path_prefix(ACCOUNTS_DIR)
+        body = body.replace(
+            b'"/*__QD_PREFIX__*/"',
+            json.dumps(prefix, ensure_ascii=False).encode("utf-8"), 1)
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))

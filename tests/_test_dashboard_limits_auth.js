@@ -36,9 +36,9 @@ function fakeRes(status, body, jsonable){
     text(){ reads++; if(reads > 1) throw new Error('BODY-READ-TWICE'); return Promise.resolve(typeof body === 'string' ? body : JSON.stringify(body)); } };
 }
 let masked = 0, next = null;
-const authApi = new Function('fetch', 'authHeaders', 'panelNeedsLogin',
+const authApi = new Function('fetch', 'authHeaders', 'panelNeedsLogin', 'api_url',
   AUTH + '; return {getJSON:getJSON, postJSON:postJSON};')(
-  () => Promise.resolve(next), () => ({}), () => { masked++; });
+  () => Promise.resolve(next), () => ({}), () => { masked++; }, (p) => p);
 
 (async () => {
   const SERVER_MSG = '面板仍在使用默认密码，局域网内任何人都能登录后读到明文 API Key。';

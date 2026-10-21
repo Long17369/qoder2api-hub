@@ -153,6 +153,8 @@ const win = {
   addEventListener(){},
   location: { search: '', href: ORIGIN + '/', hash: '', pathname: '/', origin: ORIGIN },
   matchMedia: q => ({ matches: false, addEventListener(){} }),
+  // 服务端渲染会把模板标记替换成 JSON 字面量；桩环境下模拟「未挂载」= 空串
+  QD_BASE_PREFIX: '',
   localStorage: (() => { const s = {}; return {
     getItem: k => (k in s ? s[k] : null), setItem: (k, v) => { s[k] = String(v); },
     removeItem: k => { delete s[k]; } }; })(),
