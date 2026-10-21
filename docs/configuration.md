@@ -201,3 +201,22 @@ location /qoder/ {
 | `QD_PROXY_PYTHON` | `.sh` 启动脚本使用的 Python 解释器 |
 | `QD_NO_PAUSE=1` | `.bat` 启动 / 停止脚本结束时不暂停 |
 | `QD_TASKS_DEBUG=1` | 把任务中心每个子调用的耗时打印到 stderr |
+
+
+## 本地 web 工具（`QD_WEB_TOOLS`）
+
+客户端（Codex 等）在 Responses 请求里声明的内置工具 `web_search` / `web_fetch`，Qoder 上游不会执行；
+开启本功能后由**网关本地执行**：把声明改写成同名 function，模型调用时代网关去搜索/抓页面，再把结果回灌给模型继续生成（最多 3 轮）。
+
+| 开关 | 说明 |
+|---|---|
+| 看板「设置 → 本地 web 工具」 | 持久化在 `accounts/settings.json` 的 `web_tools`，改完立即生效 |
+| `QD_WEB_TOOLS=on/off` | 环境变量优先于面板开关 |
+| `QD_WEB_TOOLS_ROUNDS` | 代跑轮次上限，默认 3 |
+
+安全边界：只允许 http/https；拒绝带凭据的 URL、localhost、私网与链路本地地址；
+重定向逐跳复检；响应体 4MB / 正文 20000 字上限。
+配置了 `HTTPS_PROXY` / `QD_WEB_TOOLS_PROXY` 时由代理做 DNS 解析（仍然拦字面私网地址）。
+
+代价：每代跑一轮都会多消耗一次账号额度；默认关闭。
+
