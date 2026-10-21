@@ -66,6 +66,22 @@ except ValueError:
     _bad = True
 check("C3 写侧非法值抛 ValueError（读侧不受影响）", _bad, None)
 
+# ---- env 引导值（QD_PATH_PREFIX）：键不存在时才回落，保存一次即遮蔽 ----
+os.environ["QD_PATH_PREFIX"] = "env-prefix"
+D2 = tempfile.mkdtemp(prefix="qd-prefix-env-")
+check("E1 settings.json 无键时回落 QD_PATH_PREFIX（清洗为 /env-prefix）",
+      S.path_prefix(D2) == "/env-prefix", S.path_prefix(D2))
+S.set_path_prefix(D2, "panel-value")
+check("E2 面板保存后 settings.json 优先，遮蔽 env",
+      S.path_prefix(D2) == "/panel-value", S.path_prefix(D2))
+S.set_path_prefix(D2, "")
+check("E3 面板显式清空 = 显式关闭，不会被 env 默认值改回去",
+      S.path_prefix(D2) == "", S.path_prefix(D2))
+os.environ.pop("QD_PATH_PREFIX")
+check("E4 env 清掉后 settings.json 显式值仍在",
+      S.path_prefix(D2) == "", S.path_prefix(D2))
+shutil.rmtree(D2, ignore_errors=True)
+
 shutil.rmtree(D, ignore_errors=True)
 
 # ================= 接线层：真 handler，本地起服 =================

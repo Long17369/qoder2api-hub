@@ -107,6 +107,8 @@ location /qoder/ {
 
 也可以直接编辑 `accounts/settings.json` 的 `path_prefix` 字段，或调用 `POST /settings/save` 传 `{"path_prefix": "/qoder"}`。
 
+**Docker / compose**：用环境变量 `QD_PATH_PREFIX` 传入（`docker-compose.yml` 已预留 `QD_PATH_PREFIX=` 一行，填上前缀即可）。settings.json 里保存过一次之后以保存值为准——在面板显式清空就等于关闭，不会被环境变量改回去；删掉 `accounts/settings.json` 里的 `path_prefix` 键（或整个文件）才会重新回落到环境变量。
+
 ## 环境变量
 
 ### 基础

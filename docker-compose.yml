@@ -28,6 +28,10 @@ services:
       # ↑ 留空：容器以 --lan 启动，首次自动生成随机 Key 写入 ./accounts/settings.json
       #   并打印在日志（docker compose logs qoder-proxy | grep -i "api key"）
       - TZ=Asia/Shanghai
+      # 挂载到别的网站子路径下时填前缀（如 /qoder）：外部 /qoder/v1/... 按 /v1/...
+      # 处理，反代只需整段转发、无需改写路径。留空 = 关闭。
+      # 面板「设置 → 路径前缀重写」保存过一次后以 settings.json 为准（含显式清空）。
+      - QD_PATH_PREFIX=
     volumes:
       # 持久化挂载账号凭证与用量流水
       # NAS / 长期部署建议改成绝对路径，避免源码目录被重装覆盖时连数据一起删掉

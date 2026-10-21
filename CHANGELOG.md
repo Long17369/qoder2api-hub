@@ -6,7 +6,7 @@
 
 **✨ 新增功能**
 
-- **路径前缀重写（Path Prefix Rewrite）**：看板「设置 → 路径前缀重写」填 `/qoder` 后，外部 `/qoder/v1/chat/completions` 按 `/v1/chat/completions` 处理，看板从 `/qoder/` 进入——网关可以原样挂在别的网站子路径下，反代只需整段转发、无需改写路径。配置存 `accounts/settings.json` 的 `path_prefix`（空 = 关闭，默认行为不变），修改立即生效无需重启。新增 `tests/_test_path_prefix.py`（18 条）。
+- **路径前缀重写（Path Prefix Rewrite）**：看板「设置 → 路径前缀重写」填 `/qoder` 后，外部 `/qoder/v1/chat/completions` 按 `/v1/chat/completions` 处理，看板从 `/qoder/` 进入——网关可以原样挂在别的网站子路径下，反代只需整段转发、无需改写路径。配置存 `accounts/settings.json` 的 `path_prefix`（空 = 关闭，默认行为不变），修改立即生效无需重启；Docker/compose 可用 `QD_PATH_PREFIX` 环境变量传入引导值（面板保存过即以其为准）。新增 `tests/_test_path_prefix.py`（22 条）。
 
 **🐛 问题修复**
 

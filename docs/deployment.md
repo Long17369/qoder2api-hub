@@ -138,7 +138,7 @@ docker run -d --name qoder-proxy --restart unless-stopped \
 
 把网关挂在某个已有站点的子路径下（例如 `https://example.com/qoder/`）时，在看板「设置 → 路径前缀重写」里填 `/qoder` 即可：外部 `/qoder/v1/chat/completions` 按 `/v1/chat/completions` 处理，看板从 `/qoder/` 进入。
 
-反代侧只需把整个前缀原样转发给网关，**不需要**做路径改写（Nginx 示例见[配置参考](configuration.md#路径前缀重写)）。配置保存在 `accounts/settings.json` 的 `path_prefix` 字段，修改后立即生效；留空 = 关闭，所有原路径直连行为不变。
+反代侧只需把整个前缀原样转发给网关，**不需要**做路径改写（Nginx 示例见[配置参考](configuration.md#路径前缀重写)）。配置保存在 `accounts/settings.json` 的 `path_prefix` 字段，修改后立即生效；留空 = 关闭，所有原路径直连行为不变。Docker 部署可以用环境变量 `QD_PATH_PREFIX` 传入引导值（compose 已预留，见[配置参考](configuration.md#路径前缀重写)）。
 
 ## 数据目录
 

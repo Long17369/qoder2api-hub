@@ -342,7 +342,9 @@ def set_banned_models(accounts_dir, value):
 # 会被重写成 /v1/chat/completions 再进路由，网关就能原样挂在反代/托管平台的
 # 子路径后面。留空 = 不重写，行为与改动前完全一致。
 PATH_PREFIX_KEY = "path_prefix"
+PATH_PREFIX_ENV = "QD_PATH_PREFIX"
 _PREFIX_MAX_LEN = 120
+_MISSING = object()   # 区分「settings.json 没写这个键」与「显式存了空串（关闭）」
 
 
 def normalize_path_prefix(value):
@@ -366,13 +368,26 @@ def normalize_path_prefix(value):
 
 
 def path_prefix(accounts_dir):
-    """生效的挂载前缀（"" = 关闭）。"""
+    """生效的挂载前缀（"" = 关闭）。
+
+    优先级：settings.json 的 `path_prefix` 键（面板保存过一次就以它为准，
+    哪怕值是空串=显式关闭）> 环境变量 `QD_PATH_PREFIX`（Docker/compose 传入
+    的引导值）> 空。键不存在时才回落环境变量，所以容器里在面板保存一次即可
+    永久覆盖 compose 的默认值。
+    """
     with _lock:
-        return normalize_path_prefix(load(accounts_dir).get(PATH_PREFIX_KEY))
+        raw = load(accounts_dir).get(PATH_PREFIX_KEY, _MISSING)
+    if raw is _MISSING:
+        return normalize_path_prefix(os.environ.get(PATH_PREFIX_ENV))
+    return normalize_path_prefix(raw)
 
 
 def set_path_prefix(accounts_dir, value):
-    """落盘挂载前缀；非法值抛 ValueError（写侧从严，读侧从不抛）。"""
+    """落盘挂载前缀；非法值抛 ValueError（写侧从严，读侧从不抛）。
+
+    落盘后会**遮蔽** `QD_PATH_PREFIX` 环境变量（键一旦存在，env 不再生效），
+    面板保存空串 = 显式关闭，不会被 env 默认值悄悄改回去。
+    """
     cleaned = normalize_path_prefix(value)
     if value and str(value).strip() not in ("", "/") and not cleaned:
         raise ValueError("invalid path prefix: %r (use something like /qoder)"

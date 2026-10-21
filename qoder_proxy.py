@@ -2077,7 +2077,8 @@ def runtime_settings_view():
         # global/intl/cn，未设时全为 0/None），面板读到即可安全回显、再保存不会
         # 把已有阈值覆盖成默认值。
         "limits": qoder_settings.limits_data(ACCOUNTS_DIR),
-        # 挂载前缀重写（"" = 关闭）。同样从配置层读，保证与 settings.json 单源。
+        # 挂载前缀重写（"" = 关闭）。与配置层同源：settings.json 显式值优先，
+        # 键不存在时回落 QD_PATH_PREFIX 环境变量（Docker/compose 引导值）。
         "path_prefix": qoder_settings.path_prefix(ACCOUNTS_DIR),
         "accounts_dir": ACCOUNTS_DIR,
         "usage_dir": USAGE_DIR,
