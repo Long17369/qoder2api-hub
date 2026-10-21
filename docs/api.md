@@ -62,7 +62,7 @@
 |---|---|---|
 | GET | `/` | Web 看板（公开） |
 | POST | `/panel/login`、`/panel/logout`、`/panel/password` | 登录、登出、修改面板密码（公开） |
-| GET / POST | `/settings`、`/settings/save` | 读取 / 保存设置（API Key、限额、模型闸门等） |
+| GET / POST | `/settings`、`/settings/save` | 读取 / 保存设置（API Key、限额、模型闸门、路径前缀重写等） |
 | GET | `/settings/reveal?id=` | 读取某个 Key 的明文（面板还在用默认密码时返回 403） |
 | POST | `/realm` | 切换全局出口（有 Key 即可） |
 | GET | `/logs`、`/logs/export`；POST `/logs/clear` | 运行日志 |

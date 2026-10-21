@@ -22,6 +22,14 @@ DEFAULT_PANEL_PASSWORD = "admin"
 PBKDF2_ROUNDS = 120_000
 SESSION_TTL = 7 * 24 * 3600
 
+
+def _is_relative_to(path, base):
+    """Path.is_relative_to() 的 3.8 等价实现（该方法 3.9 才有）。"""
+    try:
+        return os.path.commonpath([str(path), str(base)]) == str(base)
+    except ValueError:
+        return False
+
 _lock = threading.RLock()
 
 
@@ -57,7 +65,7 @@ def save(accounts_dir, data):
         base.mkdir(parents=True, exist_ok=True)
         path = base / "settings.json"
         tmp = base / "settings.json.tmp"
-        if not (path.is_relative_to(base) and tmp.is_relative_to(base)):
+        if not (_is_relative_to(path, base) and _is_relative_to(tmp, base)):
             raise ValueError("path escapes base directory")
         tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2),
                        encoding="utf-8")
@@ -327,6 +335,53 @@ def set_banned_models(accounts_dir, value):
         data["banned_models"] = patterns
         save(accounts_dir, data)
     return patterns
+
+
+# ------------------------------------------------------- path prefix rewrite
+# 挂载到别的站点子路径下用：设了前缀（如 /qoder）后，/qoder/v1/chat/completions
+# 会被重写成 /v1/chat/completions 再进路由，网关就能原样挂在反代/托管平台的
+# 子路径后面。留空 = 不重写，行为与改动前完全一致。
+PATH_PREFIX_KEY = "path_prefix"
+_PREFIX_MAX_LEN = 120
+
+
+def normalize_path_prefix(value):
+    """把用户输入清洗成 "/xxx" 形态（无尾斜杠）；空 / 唯一 "/" = 关闭（""）。
+
+    读侧永远不抛：垃圾值一律收敛到 ""（fail-open，回到无前缀行为）；
+    写侧调用方用 `value and not normalize_path_prefix(value)` 判断是否非法。
+    """
+    raw = str(value or "").strip()
+    if not raw or raw == "/":
+        return ""
+    if not raw.startswith("/"):
+        raw = "/" + raw
+    raw = raw.rstrip("/")
+    if len(raw) > _PREFIX_MAX_LEN or ".." in raw:
+        return ""
+    for ch in raw:
+        if ord(ch) < 33 or ord(ch) > 126 or ch in "?#":
+            return ""
+    return raw
+
+
+def path_prefix(accounts_dir):
+    """生效的挂载前缀（"" = 关闭）。"""
+    with _lock:
+        return normalize_path_prefix(load(accounts_dir).get(PATH_PREFIX_KEY))
+
+
+def set_path_prefix(accounts_dir, value):
+    """落盘挂载前缀；非法值抛 ValueError（写侧从严，读侧从不抛）。"""
+    cleaned = normalize_path_prefix(value)
+    if value and str(value).strip() not in ("", "/") and not cleaned:
+        raise ValueError("invalid path prefix: %r (use something like /qoder)"
+                         % value)
+    with _lock:
+        data = load(accounts_dir)
+        data[PATH_PREFIX_KEY] = cleaned
+        save(accounts_dir, data)
+    return cleaned
 
 
 # ------------------------------------------------------- panel sessions

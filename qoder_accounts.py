@@ -88,6 +88,15 @@ CLIENT_UA = "Go-http-client/2.0"
 LOGIN_TTL_SECONDS = 600
 # 账号文件写入锁（/tasks 并行刷新时多个字段各自 save，必须串行落盘）
 _SAVE_LOCK = threading.Lock()
+
+
+def _path_is_relative_to(path, base):
+    """Path.is_relative_to() 的 3.8 等价实现（该方法 3.9 才有）。"""
+    try:
+        return os.path.commonpath([str(path), str(base)]) == str(base)
+    except ValueError:
+        return False
+
 DEFAULT_USER_TYPE = "personal_professional_trial"
 
 # 业务端点（全部挂 openapi 基址，纯 Bearer，无 COSY 签名）
@@ -1443,7 +1452,8 @@ class Account(object):
         name = (safe_uid or uuid.uuid4().hex) + ".json"
         path = base / name
         tmp = base / (name + ".tmp")
-        if not (path.is_relative_to(base) and tmp.is_relative_to(base)):
+        if not (_path_is_relative_to(path, base)
+                and _path_is_relative_to(tmp, base)):
             raise ValueError("invalid path for account save")
         # 并发保护：/tasks 面板接口会并行刷新同一账号的多个字段（credits/plan/…），
         # 每个都可能触发 save；同一 tmp 路径被两个线程同时写会落出坏 JSON。

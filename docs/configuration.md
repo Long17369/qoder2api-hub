@@ -5,6 +5,7 @@
 - [API Key 与出口绑定](#api-key-与出口绑定)
 - [模型闸门](#模型闸门)
 - [限额护栏](#限额护栏)
+- [路径前缀重写](#路径前缀重写)
 - [环境变量](#环境变量)
 
 运行时配置都保存在 `accounts/settings.json` 里，大部分可以在看板「设置」页修改，重启后仍然生效。
@@ -83,6 +84,28 @@ python qoder_proxy.py [--host HOST] [--port PORT] [--lan] [--api-key KEY]
 - 默认全部关闭
 - Credits 是积分点数，实测账号余额在 0 到 1100 之间。不要按 token 的量级去填，否则永远不会触发
 - 因余额不足被暂停的账号，会在 UTC+8 每天 10:00（官方重置时间）恢复；如果余额提前恢复，也会提前解除暂停
+
+## 路径前缀重写
+
+看板「设置 → 路径前缀重写」。把网关挂在别的网站的子路径下时使用。
+
+- 填 `/qoder`（看板会自动补全开头的 `/`、去掉结尾的 `/`）后，外部访问 `/qoder/v1/chat/completions` 会按 `/v1/chat/completions` 处理，看板同理从 `/qoder/` 进入
+- 留空 = 关闭（默认），所有原路径直连行为不变；带前缀和不带前缀的请求同时可用
+- 修改后立即生效，无需重启
+- 支持多段前缀（如 `/api/qoder`），前缀长度上限 120 字符；含空格、中文、`?`、`#`、`..` 的输入会被拒绝
+
+反代示例（Nginx，只需整段转发，无需改写路径）：
+
+```nginx
+location /qoder/ {
+    proxy_pass http://127.0.0.1:8790;
+    proxy_http_version 1.1;
+    proxy_set_header Connection "";
+    proxy_buffering off;
+}
+```
+
+也可以直接编辑 `accounts/settings.json` 的 `path_prefix` 字段，或调用 `POST /settings/save` 传 `{"path_prefix": "/qoder"}`。
 
 ## 环境变量
 

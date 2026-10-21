@@ -379,6 +379,27 @@ def cors_origin_allowed(path):
     return path.startswith(CORS_PATH_PREFIXES)
 
 
+def _strip_path_prefix(path):
+    """Strip the configured mount prefix ("/qoder/..." -> "/...").
+
+    `path` includes the query string, exactly like `self.path`. The prefix is
+    read fresh from settings on every request, so panel edits apply at once.
+    An exact-prefix match (with "/" or end-of-path following) is required;
+    anything else passes through untouched, so requests without the prefix
+    keep working - mounting stays optional, not mandatory.
+    """
+    prefix = qoder_settings.path_prefix(ACCOUNTS_DIR)
+    if not prefix:
+        return path
+    if path == prefix:
+        return "/"
+    if path.startswith(prefix + "/"):
+        return path[len(prefix):]
+    if path.startswith(prefix + "?"):
+        return path[len(prefix):]
+    return path
+
+
 _lock = threading.Lock()
 _login_lock = threading.Lock()
 _login_attempts = {}  # ip -> list of timestamp
@@ -629,15 +650,15 @@ def _persist_usage(row, summary, fail_label):
         usage_dir.mkdir(parents=True, exist_ok=True)
         log_path = usage_dir / os.path.basename(USAGE_LOG)
         summary_path = usage_dir / os.path.basename(USAGE_SUMMARY)
-        if not (log_path.is_relative_to(usage_dir)
-                and summary_path.is_relative_to(usage_dir)):
+        if not (qoder_settings._is_relative_to(log_path, usage_dir)
+                and qoder_settings._is_relative_to(summary_path, usage_dir)):
             raise ValueError("usage path escapes base directory")
         with open(log_path, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(row, ensure_ascii=False) + "\n")
         tmp_summary = usage_dir / (
             os.path.basename(USAGE_SUMMARY)
             + ".%d.%d.tmp" % (os.getpid(), threading.get_ident()))
-        if not tmp_summary.is_relative_to(usage_dir):
+        if not qoder_settings._is_relative_to(tmp_summary, usage_dir):
             raise ValueError("usage path escapes base directory")
         try:
             tmp_summary.write_text(json.dumps(summary, ensure_ascii=False,
@@ -1120,7 +1141,7 @@ def save_persisted_realm(realm):
             state_dir = Path(ACCOUNTS_DIR).resolve()
             state_dir.mkdir(parents=True, exist_ok=True)
             state_file = state_dir / os.path.basename(REALM_STATE_FILE)
-            if not state_file.is_relative_to(state_dir):
+            if not qoder_settings._is_relative_to(state_file, state_dir):
                 raise ValueError("realm state path escapes base directory")
             state_file.write_text(
                 json.dumps({"realm": realm, "updated_at": time.time(),
@@ -2056,6 +2077,8 @@ def runtime_settings_view():
         # global/intl/cn，未设时全为 0/None），面板读到即可安全回显、再保存不会
         # 把已有阈值覆盖成默认值。
         "limits": qoder_settings.limits_data(ACCOUNTS_DIR),
+        # 挂载前缀重写（"" = 关闭）。同样从配置层读，保证与 settings.json 单源。
+        "path_prefix": qoder_settings.path_prefix(ACCOUNTS_DIR),
         "accounts_dir": ACCOUNTS_DIR,
         "usage_dir": USAGE_DIR,
         "settings_file": qoder_settings.settings_path(ACCOUNTS_DIR),
@@ -7857,8 +7880,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def _supplied_key(self):
         """The key the caller presented, from the header or the ?key= query."""
-        supplied = (self.headers.get("Authorization") or "").removeprefix(
-            "Bearer ").strip()
+        auth = self.headers.get("Authorization") or ""
+        supplied = (auth[len("Bearer "):] if auth.startswith("Bearer ")
+                    else auth).strip()
         if supplied:
             return supplied
         # Anthropic 客户端（Claude Code 等）用 x-api-key 头，而不是
@@ -8016,6 +8040,8 @@ class Handler(BaseHTTPRequestHandler):
         return False
 
     def do_OPTIONS(self):
+        # 挂载前缀重写（同样发生在 CORS 判定前，见 do_GET 的说明）。
+        self.path = _strip_path_prefix(self.path)
         self.send_response(204)
         if cors_origin_allowed(self.path):
             self.send_header("Access-Control-Allow-Origin", "*")
@@ -8026,6 +8052,10 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
+        # 挂载前缀重写：反代把 https://site.com/qoder/* 整段转发过来时，请求
+        # 路径带 /qoder 前缀；这里先剥掉前缀再走原路由，其余逻辑零改动。
+        # 必须在所有 self.path 消费（面板路由判定、CORS、?key= 回退）之前做。
+        self.path = _strip_path_prefix(self.path)
         # #26：每个请求入口清空「本次实际出口」标注。self 在 keep-alive 连接上是
         # **复用**的，不清空的话后续非 chat 端点（/v1/models、/usage/*、/realm）
         # 会带回上一次 chat 的残留值 —— 那会让面板把「上一次的出口」当成「本次的」。
@@ -8533,6 +8563,14 @@ class Handler(BaseHTTPRequestHandler):
             # P1-4：全局封禁列表（逗号/分号/换行分隔均可，清洗在 qoder_settings）。
             reply["banned_models"] = qoder_settings.set_banned_models(
                 ACCOUNTS_DIR, payload.get("banned_models"))
+        if "path_prefix" in payload:
+            # 挂载前缀重写：非法值直接 400（写侧从严），不静默吞掉。
+            try:
+                prefix = qoder_settings.set_path_prefix(
+                    ACCOUNTS_DIR, payload.get("path_prefix"))
+            except ValueError as exc:
+                return self._error(400, str(exc), "invalid_request_error")
+            reply["path_prefix"] = prefix
         if "auth_disabled" in payload:
             qoder_settings.set_auth_disabled(ACCOUNTS_DIR,
                                              payload.get("auth_disabled"))
@@ -9425,6 +9463,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, result)
 
     def do_POST(self):
+        # 挂载前缀重写：与 do_GET 同一入口逻辑，先剥前缀再路由。
+        self.path = _strip_path_prefix(self.path)
         # #26：同 do_GET —— 每次请求入口清空，避免 keep-alive 复用实例时把上一次
         # chat 的出口/原因带到别的响应上。
         self.realm_used = ""

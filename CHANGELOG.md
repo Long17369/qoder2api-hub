@@ -2,6 +2,16 @@
 
 每个版本的发布说明同步在 [GitHub Releases](https://github.com/shuishuipingan/qoder2api-hub/releases)。
 
+## 未发布
+
+**✨ 新增功能**
+
+- **路径前缀重写（Path Prefix Rewrite）**：看板「设置 → 路径前缀重写」填 `/qoder` 后，外部 `/qoder/v1/chat/completions` 按 `/v1/chat/completions` 处理，看板从 `/qoder/` 进入——网关可以原样挂在别的网站子路径下，反代只需整段转发、无需改写路径。配置存 `accounts/settings.json` 的 `path_prefix`（空 = 关闭，默认行为不变），修改立即生效无需重启。新增 `tests/_test_path_prefix.py`（18 条）。
+
+**🐛 问题修复**
+
+- **Python 3.8 兼容**：`Path.is_relative_to()`（3.9 才有）导致 `qoder_settings.save()`、`qoder_accounts.Account.save()`、`qoder_proxy._persist_usage()` 在 3.8 上每次写盘必崩（面板设置保存、账号落盘、用量流水全部失效）。改为共享的 `commonpath` 实现，3.9+ 行为不变。
+
 ## 版本号规则
 
 - 每次发布**照常递增补丁号**：1.6.0 → 1.6.1 → 1.6.2 …

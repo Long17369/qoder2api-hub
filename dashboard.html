@@ -1108,6 +1108,22 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     </section>
 
     <section>
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;flex-wrap:wrap;gap:10px">
+        <div>
+          <h2 style="margin:0">路径前缀重写 <em id="setPrefixState"></em></h2>
+          <div style="font-size:12px;color:var(--dim);margin-top:4px;line-height:1.6">
+            把网关挂在别的网站子路径下时使用：填 <code>/qoder</code> 后，外部 <code>/qoder/v1/chat/completions</code> 会按 <code>/v1/chat/completions</code> 处理，看板同理从 <code>/qoder/</code> 进入。<b>留空 = 关闭</b>（原路径直连不受影响）。修改后立即生效，无需重启；反代只需整段转发，无需改写路径。
+          </div>
+        </div>
+        <button onclick="savePathPrefix(this)">保存前缀</button>
+      </div>
+      <div style="background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:12px 14px">
+        <input id="setPathPrefix" type="text" placeholder="例如 /qoder（留空关闭）"
+               style="width:100%;max-width:420px;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:8px 12px;color:var(--fg);font:inherit;font-family:monospace">
+      </div>
+    </section>
+
+    <section>
       <h2>运行信息</h2>
       <table>
         <tbody>
@@ -3791,6 +3807,7 @@ async function loadSettings(showToast){
     set('setFile', data.settings_file);
     set('setSettingsFile', data.settings_file);
     renderLimits(data.limits || null);   // 后端 GET /settings 带回 limits 时才允许保存（见 saveLimits 的护栏）
+    renderPathPrefix(data.path_prefix);  // ""（未配置）也要回显：让输入框回到占位符状态
     if(showToast) toast('设置已刷新', 'ok');
   } catch(e) {
     if(showToast) toast('读取设置失败: ' + e.message, 'bad');
@@ -4214,6 +4231,37 @@ async function saveLimits(btn){
     toast('保存限额失败: ' + e.message, 'bad');
   }finally{
     if(btn){ btn.disabled = false; btn.textContent = '保存限额'; }
+  }
+}
+
+/* ---- 路径前缀重写：挂在别的网站子路径下（/qoder/v1/... 按 /v1/... 处理）----
+   后端每请求现读配置，保存即生效；本页的 AJAX 全部是相对路径 fetch，
+   若当前就是从前缀路径进来的，保存后刷新依旧命中同一前缀。 */
+function renderPathPrefix(prefix){
+  const input = document.getElementById('setPathPrefix');
+  const stateEl = document.getElementById('setPrefixState');
+  const value = (prefix || '').trim();
+  if(input) input.value = value;
+  if(stateEl){
+    stateEl.textContent = value ? '(已启用 ' + value + ')' : '(未启用)';
+    stateEl.style.color = value ? 'var(--accent2)' : 'var(--dim)';
+  }
+}
+
+async function savePathPrefix(btn){
+  const input = document.getElementById('setPathPrefix');
+  if(!input) return;
+  const value = input.value.trim();
+  if(btn){ btn.disabled = true; btn.textContent = '保存中...'; }
+  try{
+    const r = await postJSON('/settings/save', {path_prefix: value});
+    // 用后端归一化结果回填：/qoder/ 这类带尾斜杠的写法以服务端为准
+    renderPathPrefix(r && r.path_prefix !== undefined ? r.path_prefix : value);
+    toast(value ? '路径前缀已保存，立即生效' : '路径前缀已清除', 'ok');
+  }catch(e){
+    toast('保存路径前缀失败: ' + e.message, 'bad');
+  }finally{
+    if(btn){ btn.disabled = false; btn.textContent = '保存前缀'; }
   }
 }
 

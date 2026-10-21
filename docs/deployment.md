@@ -134,12 +134,18 @@ docker run -d --name qoder-proxy --restart unless-stopped \
 - TUN / fake-ip 模式的透明代理（例如 Clash）无需任何设置，网关能识别 fake-ip 网段
 - Docker 用 `-e HTTPS_PROXY=...` 传入
 
+## 挂载到别的网站子路径
+
+把网关挂在某个已有站点的子路径下（例如 `https://example.com/qoder/`）时，在看板「设置 → 路径前缀重写」里填 `/qoder` 即可：外部 `/qoder/v1/chat/completions` 按 `/v1/chat/completions` 处理，看板从 `/qoder/` 进入。
+
+反代侧只需把整个前缀原样转发给网关，**不需要**做路径改写（Nginx 示例见[配置参考](configuration.md#路径前缀重写)）。配置保存在 `accounts/settings.json` 的 `path_prefix` 字段，修改后立即生效；留空 = 关闭，所有原路径直连行为不变。
+
 ## 数据目录
 
 | 路径 | 内容 |
 |---|---|
 | `accounts/*.json` | 每个账号一个文件，**Token 以明文保存**，不要外传或同步到网盘 |
-| `accounts/settings.json` | 面板密码摘要、API Key、模型闸门、限额配置 |
+| `accounts/settings.json` | 面板密码摘要、API Key、模型闸门、限额配置、路径前缀 |
 | `accounts/machine_identity.json` | 缓存的机器身份 |
 | `accounts/models-cache-<区域>.json` | 上次成功获取的官方模型清单，7 天内有效。上游暂时不可用时用它兜底 |
 | `accounts/agent-backups/` | 智能体一键配置写入前的原文件备份 |
