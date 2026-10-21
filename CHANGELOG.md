@@ -19,6 +19,30 @@
   1.6.14 → **1.7.0**（不是 1.6.15，也不是 1.7.14）。
 - 主版本号只在确有破坏性变更时才动。
 
+## v1.6.2
+
+**🐛 问题修复**
+
+- **未指定出口的请求被入口层钉死当前区**（#76，PR #77 by ZaneCJP）：三个请求入口都写成 `self._request_realm() or CURRENT_REALM`，把「用户没指定出口」折叠成「当前区」——于是区域独占模型在 `_model_precheck` 阶段直接 400，`open_upstream` 里基于模型的自动路由分支永远进不去。现在三个入口一律传 `None`，由路由层按模型/账号自动选；`X-Realm` / `?realm=` / Key 绑区的显式优先级逐字节不变，`GET /v1/models` 的两个端点仍保留确定区域。新增 `tests/_test_issue76_auto_realm.py`（21 条 + 金丝雀自证）。
+
+**🔧 身份形态对齐（PR #75 by maiphucguy）**
+
+对照官方 **桌面端 0.4.8 / qodercli 1.1.75** 静态核对后修正出站形态：
+
+- **推理链路**：UA 改为官方 CLI 同款 `undici`（此前是 `Go-http-client/2.0`，等于自报脚本）；`cosy-version` 升到 `1.1.75`（可用 `QD_COSY_VERSION` 覆盖）；补 `cosy-business-product` / `cosy-business-type` / `cosy-scene`，`cosy-data-policy` 改小写；`cosy-machineos` 所有请求都带。
+- **签到 / 活动链路**：请求头改为官方桌面端的精确集合（不再叠 `X-Request-ID` / `Origin` / `Referer` 等）；`Cosy-MachineHostname` 取本机主机名（按官方规整规则），`Cosy-MachineOS` 用真实的 `{arch}_{platform}`，`Cosy-Version` 升到 `0.4.8`；runtime-info 环境码 cn=`0` / intl=`3`，且只有 darwin/win32 带 `--account-stdin`。
+- **UMID 组件发现**：覆盖三端默认安装目录（Windows launcher/Programs/ProgramFiles、macOS `.app`、Linux `/opt`）；Windows 未装桌面端时回退 `QD_UMID_DIR` 或仓库 `umid/`；`_install_umid.py` 支持 `--platform win32`（按 PE 的 DLL 标志位区分 exe/dll）。
+- **身份缓存**：落盘缓存记录 `environment`，缺字段或与当前环境码不符时作废重取。
+
+**⚠️ 升级影响（务必看）**
+
+1. **身份会重新获取一次**：旧缓存没有 `environment`，升级后首次走活动链路会重取并写回，之后照常复用。
+2. **会上报主机名**：签到/活动请求带本机主机名（与官方桌面端一致）。Docker 默认主机名是容器 ID，每次重建会变；想固定请在 compose 里设 `hostname:`。
+3. **Linux / Docker 的 `Cosy-MachineOS` 会变**：从 `x86_64_win32` 变为 `x86_64_linux`（与推理链路一致）。想保持旧指纹可设 `QD_COSY_MACHINE_OS=x86_64_win32`；设为 `auto` 则按系统架构自动识别。
+4. **推理请求 UA 变化**：`Go-http-client/2.0` → `undici`。
+
+**验证**：PR #77 独立 54 suites / 1662 checks；PR #75 独立 53 suites / 1656 checks；合并后全量 **54 suites / 1678 checks / 0 failed**。
+
 ## v1.6.1
 
 **🐛 问题修复**
