@@ -531,6 +531,15 @@ a:hover{text-decoration:underline}
 .ck-when-off input{width:11px;height:11px;accent-color:var(--accent);cursor:pointer}
 .ck-when-off:hover{color:var(--fg)}
 
+.sortable{cursor:pointer;user-select:none}
+.sortable:hover{color:var(--accent)}
+.sortable .sort-lbl{user-select:none;display:inline-flex;
+  align-items:center;gap:2px;padding:1px 2px;border-radius:4px}
+.sortable .sort-lbl:hover{color:var(--accent)}
+.sortable .sort-lbl:hover .sort-ind{opacity:1}
+.sort-ind{font-size:9px;opacity:.55;letter-spacing:-1px}
+.sortable.sorted th,.sortable.sorted .sort-lbl{color:var(--accent)}
+.sortable.sorted .sort-ind{opacity:1;font-weight:700}
 /* ================= 账号页（独立板块） ================= */
 .acct-realms{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:14px;margin-bottom:16px}
 .acct-realms .realm-card{transition:transform .2s ease,box-shadow .2s ease,border-color .2s ease}
@@ -972,6 +981,467 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--accent);
   });
 })();
 </script>
+<script>
+/* i18n 层。拆成三块放在同一个 <script> 里，是为了让「纯查找核」能被
+ * tests/_test_i18n_core.js 按锚点切出来在 node 里直接 eval —— 它不碰 DOM，
+ * 所以四级兜底语义（尤其是「查不到就原样返回中文」）可以脱离浏览器断言。
+ *
+ * 块顺序是有约束的：本块必须夹在 head/主题块与主脚本块之间。
+ * tests/_test_dashboard_full_load.js 取 blocks[length-1] 当主脚本、
+ * 断言 blocks[0] 是主题块；把本块挪到主脚本之后就等于让它测错对象。
+ *
+ * 为什么在 DOM 边界翻译、而不是把 650 处字面量改成 t('key')：
+ * 全仓 75% 的中文在主脚本里，其中近半是和运行期变量拼起来的片段
+ * （'最近一次对话（' + at + '）走了 ' + nameOf(r)），另有 ~315 条中文来自
+ * Python 后端经 fetch 渲染成 toast/错误框。观察器看到的是**最终落盘的字符串**，
+ * 所以静态 HTML、JS 动态文本、后端消息一套机制全覆盖，且不改任何源字面量
+ * ——17 处按中文文本 grep dashboard 源码的断言因此继续为绿。详见 docs/i18n.md。 */
+(function(){
+'use strict';
+
+/* ================= L2 · 纯查找核（无 DOM） ================= */
+/* BEGIN-PURE-I18N-CORE —— tests/_test_i18n_core.js 按这两个锚点切片 */
+var CJK = /[㐀-䶿一-鿿豈-﫿]/;
+
+var MSG = {}, PAT = {}, FRG = {}, MEM = new Map(), PTC = new Map(), READY = false;
+
+/* '{0}'/'{1}' 槽位编译成捕获组。先转义正则元字符，但故意放过 { } ——
+ * 它们是槽位语法，不是量词。 */
+function compile(tpl){
+  var slots = [];
+  var re = tpl.replace(/[.*+?^$()|[\]\\]/g, '\\$&')
+              .replace(/\{(\d+)\}/g, function(_, i){ slots.push(+i); return '([\\s\\S]+?)'; });
+  return { re: new RegExp('^' + re + '$'), slots: slots };
+}
+
+/* 槽位里常常本身就是可译片段（'走了 国内版'、'颜色主题: 跟随系统 (当前浅色)'）。
+ * 整句翻了、槽位留着中文，界面就成了半中半英 —— 所以填槽时再走一遍查表。
+ * 深度必须封死：源串只写 {0} 的模式会 ^(.+)$ 吃掉整句再自我递归，
+ * 不能指望包作者永远不写那种模式。 */
+var MAX_SLOT_DEPTH = 2;
+
+function fill(tpl, args, depth){
+  return tpl.replace(/\{(\d+)\}/g, function(_, i){
+    var v = args[+i];
+    if(v === undefined) return '';
+    return depth < MAX_SLOT_DEPTH ? lookup(v, depth + 1) : v;
+  });
+}
+
+/* 求值顺序按「便宜且可靠」排：整串精确 → 片段精确 → 折叠空白 → 模板正则。
+ * 前三级是哈希查表，最后一级是 O(P) 扫描且可能误捕获，所以放最后。
+ *
+ * 为什么要「折叠空白」这一遍：HTML 里跨行写的长文案，文本节点的 nodeValue
+ * 带着换行和缩进（浏览器只是**渲染时**折叠它，取值时不折叠）。抄成单空格的
+ * 键于是永远命不中，而且静默 —— 兜底返回原文，看起来只是「这条还没翻」。
+ * tests/_test_i18n_packs.py 就是为抓它而写的，也确实抓到了 5 条。
+ *
+ * 顺序不能反：先试未 trim 的原串，片段键的前导空格才有机会命中
+ * （' 个 Key 生效' → ' keys active'，空格是拼接的一部分）。i18n/README.md
+ * 承诺「空格属于键」，靠这个顺序兑现。 */
+function squash(s){ return s.replace(/\s+/g, ' ').trim(); }
+
+function lookup(src, depth){
+  var d = depth || 0;
+  if(MSG.hasOwnProperty(src)) return MSG[src];
+  if(FRG.hasOwnProperty(src)) return FRG[src];
+  var t = src.trim();
+  if(!t) return src;
+  if(t !== src){
+    if(MSG.hasOwnProperty(t)) return MSG[t];
+    if(FRG.hasOwnProperty(t)) return FRG[t];
+  }
+  var q = squash(src);
+  if(q !== t){
+    if(MSG.hasOwnProperty(q)) return MSG[q];
+    if(FRG.hasOwnProperty(q)) return FRG[q];
+  }
+  if(CJK.test(t)){
+    for(var k in PAT){
+      /* 编译缓存必须放在 PAT 之外：PAT[k] 是译文字符串本身，给字符串挂属性在
+       * 'use strict' 里直接抛 TypeError —— 浏览器实测会把整次 walk 打断在表头
+       * 之后（属性翻好了、正文没翻），node 的 sloppy eval 则静默失败，所以
+       * 这条只有严格模式的套件才抓得到。 */
+      var c = PTC.get(k);
+      if(c === undefined){ c = compile(k); PTC.set(k, c); }
+      var m = c.re.exec(t) || (q !== t && c.re.exec(q));
+      if(m && m !== false){
+        var a = {};
+        for(var i = 0; i < c.slots.length; i++) a[c.slots[i]] = m[i + 1];
+        return fill(PAT[k], a, d);
+      }
+    }
+  }
+  /* 第四级兜底：原样返回输入。这就是「缺翻译不留白、不漏 key」的实现点，
+   * 也是观察器写入后不会自触发死循环的原因 —— 英文不是任何 key，
+   * 再走一遍 t() 得到同一个字符串，比较相等就不再写。 */
+  return src;
+}
+
+function t(src){
+  if(typeof src !== 'string' || !READY) return src;
+  if(MEM.has(src)) return MEM.get(src);
+  var out = lookup(src);
+  MEM.set(src, out);
+  return out;
+}
+
+function tier(obj, label){
+  if(obj === undefined || obj === null) return {};
+  if(typeof obj !== 'object' || Array.isArray(obj)) throw new Error(label + ' must be an object');
+  var out = {};
+  for(var k in obj){
+    if(!Object.prototype.hasOwnProperty.call(obj, k)) continue;
+    if(typeof obj[k] !== 'string') throw new Error(label + ' entries must map to strings');
+    out[k] = obj[k];
+  }
+  return out;
+}
+
+/* 一个坏条目就让整包失效：半套翻译比没有更难排查（见 docs/i18n.md §12.3）。 */
+function load(pack){
+  var nextMsg = tier(pack && pack.messages, 'messages');
+  var nextPat = tier(pack && pack.patterns, 'patterns');
+  var nextFrg = tier(pack && pack.fragments, 'fragments');
+  MSG = nextMsg; PAT = nextPat; FRG = nextFrg;
+  MEM = new Map(); PTC = new Map();
+  READY = !!(Object.keys(MSG).length || Object.keys(PAT).length || Object.keys(FRG).length);
+  return READY;
+}
+
+/* 原生 alert/confirm/prompt 不经过 DOM，观察器永远看不到它们；这里给宿主对象
+ * 的三个方法包一层，只翻第一个字符串参数，其余参数与返回值原样透传。同一宿主
+ * 只包一次：重复调用返回 false，避免翻译被叠成两层（第二次会拿到英文再查表）。 */
+function installDialogI18n(win, translate){
+  if(!win || typeof translate !== 'function') return false;
+  if(win.__qdDialogI18n) return false;
+  var names = ['alert', 'confirm', 'prompt'];
+  var wrapped = 0;
+  for(var i = 0; i < names.length; i++){
+    var name = names[i];
+    if(typeof win[name] !== 'function') continue;
+    (function(fn){
+      win[name] = function(msg){
+        var args = Array.prototype.slice.call(arguments);
+        if(typeof args[0] === 'string') args[0] = translate(args[0]);
+        return fn.apply(win, args);
+      };
+    })(win[name]);
+    wrapped++;
+  }
+  if(!wrapped) return false;
+  try{ win.__qdDialogI18n = true; }catch(e){}
+  return true;
+}
+/* END-PURE-I18N-CORE */
+
+var API = { t: t, load: load, isReady: function(){ return READY; },
+            installDialogI18n: installDialogI18n };
+if(typeof window !== 'undefined') window.QD_I18N = API;
+
+/* ================= L3 · DOM 应用引擎 ================= */
+var WATCH_ATTRS = ['title', 'placeholder', 'aria-label'];
+/* 日志流是后端自由格式的开发文本（~145 条），既最没翻译价值、又是每 5 秒
+ * 一轮的最大变更源；<code>/<pre> 是命令与配置示例，翻了就不可用。
+ * .no-i18n 给语言下拉自己用（母语名不能被翻成别的语言）。 */
+var SKIP_SEL = '.log-line, code, pre, .no-i18n';
+var seen = (typeof WeakSet === 'function') ? new WeakSet() : null;
+
+function skippable(el){
+  return !!(el && el.closest && el.closest(SKIP_SEL));
+}
+
+function applyText(n){
+  if(seen){ if(seen.has(n)) return; seen.add(n); }
+  var out = t(n.nodeValue);
+  if(out !== n.nodeValue) n.nodeValue = out;
+}
+
+function applyAttrs(el){
+  if(!el || !el.hasAttribute) return;
+  for(var i = 0; i < WATCH_ATTRS.length; i++){
+    var a = WATCH_ATTRS[i];
+    if(!el.hasAttribute(a)) continue;
+    var cur = el.getAttribute(a);
+    var out = t(cur);
+    if(out !== cur) el.setAttribute(a, out);
+  }
+}
+
+function walk(root){
+  /* 节点桩没有 createTreeWalker 也要能跑完（见 tests 桩），静默降级。 */
+  if(!root || typeof document === 'undefined' || !document.createTreeWalker) return;
+  if(root.nodeType === 1){
+    if(skippable(root)) return;
+    applyAttrs(root);
+    /* SHOW_ELEMENT 的 walker 只会 yield root 的**后代**，永远不给 root 本身，
+     * 所以叶子元素（只有文本子节点的 button/span/h2）必须在这里直接处理自己的
+     * 孩子 —— 观察器报上来的恰恰多数是这种节点：文本被 JS 改掉时 target 就是它。
+     * 少这一段的表现是「属性翻了、正文没翻」，而且只在运行期改写的节点上出现。 */
+    var rk = root.childNodes;
+    for(var ri = 0; ri < rk.length; ri++){
+      if(rk[ri].nodeType === 3) applyText(rk[ri]);
+    }
+  }
+  var w = document.createTreeWalker(root, 1 /* SHOW_ELEMENT */, null);
+  var el = w.nextNode();
+  while(el){
+    if(!skippable(el)){
+      applyAttrs(el);
+      var kids = el.childNodes;
+      for(var i = 0; i < kids.length; i++){
+        if(kids[i].nodeType === 3) applyText(kids[i]);
+      }
+    }
+    el = w.nextNode();
+  }
+}
+
+var pending = null;
+function schedule(root){
+  if(!READY) return;
+  var target = root || document.body;
+  if(!target) return;
+  if(pending){ if(pending.indexOf(target) < 0) pending.push(target); }
+  else pending = [target];
+  var flush = function(){
+    var list = pending; pending = null;
+    if(!list) return;
+    for(var i = 0; i < list.length; i++) walk(list[i]);
+  };
+  /* rAF 在后台页签 / 被遮挡窗口里**根本不触发**（实测 visibilityState=hidden 时
+   * 一帧都不来）。语言切换走的是 reload，用户切走页签后整页会一直停在中文。
+   * 所以 rAF 只当「同帧合并」用，另挂一个定时器兜底；谁先到谁排空 pending，
+   * 另一个读到 null 直接返回 —— 重复调用无害，不需要额外状态。 */
+  if(typeof requestAnimationFrame === 'function') requestAnimationFrame(flush);
+  setTimeout(flush, 120);
+}
+
+function startObserver(){
+  if(typeof MutationObserver !== 'function' || !document.body) return;
+  new MutationObserver(function(recs){
+    var roots = [];
+    for(var i = 0; i < recs.length; i++){
+      var n = recs[i].target;
+      /* 文本节点自己不是可遍历根，取它的父元素。 */
+      var el = (n && n.nodeType === 3) ? n.parentElement : n;
+      if(el && el.nodeType === 1 && roots.indexOf(el) < 0) roots.push(el);
+    }
+    for(var j = 0; j < roots.length; j++) schedule(roots[j]);
+  }).observe(document.body, {
+    subtree: true, childList: true, characterData: true,
+    attributes: true, attributeFilter: WATCH_ATTRS
+  });
+}
+
+/* ================= L4 · 语言偏好与启动 ================= */
+var LANG_KEY = 'qd-lang';
+var PACK_CACHE = 'qd-i18n-pack';
+var SOURCE_LANG = 'zh';
+
+function readLS(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } }
+function writeLS(k, v){ try{ localStorage.setItem(k, v); }catch(e){} }
+
+function getPref(){
+  /* ?lang= 给截图和套件用；它不写进 localStorage，一次性覆盖。 */
+  try{
+    var q = new URLSearchParams(location.search).get('lang');
+    if(q) return q;
+  }catch(e){}
+  return readLS(LANG_KEY) || '';
+}
+
+/* 浏览器主语言子标签：'en-US' → 'en'；拿不到就空串。 */
+function navLang(){
+  var nav = (typeof navigator !== 'undefined' && navigator.language) ? navigator.language.toLowerCase() : '';
+  return nav ? nav.split('-')[0] : '';
+}
+
+function detectPref(packs){
+  var want = getPref();
+  if(want === SOURCE_LANG) return SOURCE_LANG;
+  var codes = {};
+  for(var i = 0; i < packs.length; i++) codes[packs[i].code] = 1;
+  if(want && codes[want]) return want;
+  var exact = navLang();
+  if(exact && codes[exact]) return exact;
+  return SOURCE_LANG;
+}
+
+/* 返回 {ok, version}：version 要和清单里的比一遍，否则缓存会变成永久旧包 ——
+ * 「往 i18n/ 丢个文件就生效」这条承诺只对第一次访问的人成立。 */
+function hydrateFromCache(code){
+  var out = {ok: false, version: 0};
+  if(!code || code === SOURCE_LANG) return out;
+  var raw = readLS(PACK_CACHE);
+  if(!raw) return out;
+  try{
+    var hit = JSON.parse(raw);
+    if(hit && hit.code === code && hit.pack && load(hit.pack)){
+      out.ok = true; out.version = hit.version || 0;
+    }
+  }catch(e){}
+  return out;
+}
+
+function fetchJSON(url){
+  return fetch(url, {cache: 'no-store'}).then(function(r){
+    if(!r.ok) throw new Error('HTTP ' + r.status);
+    return r.json();
+  });
+}
+
+function loadPack(code, version){
+  if(code === SOURCE_LANG) return Promise.resolve(false);
+  return fetchJSON('/i18n/' + code + '.json').then(function(pack){
+    var ok = load(pack);
+    if(ok) writeLS(PACK_CACHE, JSON.stringify({code: code, version: version || 0, pack: pack}));
+    return ok;
+  });
+}
+
+/* 标签页标题不在 body 子树里，走查碰不到，只能显式翻一次。t() 是恒等兜底，
+ * 所以重复调用安全，缺键时保持中文。 */
+function applyTitle(){ document.title = t(document.title); }
+
+/* 只在启动时应用一次：灌包、走一遍已有 DOM、挂观察器。 */
+function applyActive(code, version){
+  document.documentElement.setAttribute('lang', code === SOURCE_LANG ? 'zh-CN' : code);
+  if(code === SOURCE_LANG) return Promise.resolve(false);
+  return loadPack(code, version).then(function(ok){
+    if(ok){ schedule(document.body); startObserver(); applyTitle(); }
+    return ok;
+  });
+}
+
+window.selectLang = function(code, evt){
+  if(evt){ evt.preventDefault(); evt.stopPropagation(); }
+  var next = code || SOURCE_LANG;
+  writeLS(LANG_KEY, next);
+  /* 换语言一律整页重载，包括「源语言 → 另一种语言」。
+   * 已改写的文本节点，它的中文原文只存在于改写前那一瞬间：原地切换在
+   * en → zh 这一步还原不出来，en → id 更会把英文留在页面上。给每个节点
+   * 存一份原值能绕过去，但那是一整类「切两次就残留」bug 的源头。
+   * 包体已缓存在 localStorage，重载后首帧即目标语言（docs/i18n.md §8）。 */
+  location.reload();
+};
+
+function closeLangMenu(){
+  var menu = document.getElementById('langDropdown');
+  var btn = document.getElementById('langToggleBtn');
+  if(menu) menu.classList.remove('open');
+  if(btn) btn.setAttribute('aria-expanded', 'false');
+}
+
+window.toggleLangMenu = function(evt){
+  if(evt){ evt.preventDefault(); evt.stopPropagation(); }
+  var menu = document.getElementById('langDropdown');
+  var btn = document.getElementById('langToggleBtn');
+  if(!menu) return;
+  var wasOpen = menu.classList.contains('open');
+  var theme = document.getElementById('themeDropdown');
+  if(theme) theme.classList.remove('open');   // 两个下拉不同时开
+  var open = !wasOpen;
+  menu.classList.toggle('open', open);
+  if(btn) btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+};
+
+var svgGlobe = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9.2"></circle><path d="M3.2 9.2h17.6M3.2 14.8h17.6"></path><path d="M12 2.9c2.6 2.6 2.6 15.6 0 18.2M12 2.9c-2.6 2.6-2.6 15.6 0 18.2"></path></svg>';
+var svgCheck = '<svg class="theme-opt-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>';
+
+function escHTML(s){
+  return String(s).replace(/[<>&"]/g, function(c){
+    return ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' })[c];
+  });
+}
+
+function renderMenu(packs, active){
+  var menu = document.getElementById('langDropdown');
+  var icon = document.getElementById('langToggleIcon');
+  if(icon && !icon.innerHTML) icon.innerHTML = svgGlobe;
+  if(!menu) return;
+  /* 下拉里一律用「母语自称」（English / Bahasa Indonesia / 简体中文）：
+   * 界面已经翻成一种你读不懂的语言时，只有母语名还找得回来。 */
+  var items = [{ code: SOURCE_LANG, name: '简体中文' }].concat(packs);
+  var html = '';
+  for(var i = 0; i < items.length; i++){
+    var code = String(items[i].code).replace(/[^A-Za-z0-9._-]/g, '');
+    var on = items[i].code === active;
+    html += '<button type="button" role="menuitem" class="theme-option no-i18n' + (on ? ' active' : '') +
+            '" onclick="selectLang(\'' + code + '\', event)">' +
+            '<span class="theme-opt-text">' + escHTML(items[i].name || code) + '</span>' +
+            svgCheck + '</button>';
+  }
+  menu.innerHTML = html;
+}
+
+window.initLangSystem = function(){
+  /* PR #114：原生 alert/confirm/prompt 不走 DOM 观察器，必须显式包一层；
+   * 这里装上（幂等），之后换包/切语言都沿用同一个 t。 */
+  try{ installDialogI18n(window, t); }catch(e){}
+  var pref = getPref();
+  /* 首屏之前先灌 localStorage 里的缓存包：第 2 次及以后访问不再闪中文。
+   * 首访没有缓存只能等 fetch —— 这是不做构建步骤、不做服务端内联的实际
+   * 下限（docs/i18n.md §8）。
+   * 自动跟随浏览器语言的人不会有 qd-lang，所以缓存要用同一个猜测去取；
+   * 用 pref 取的话这部分人每次都落回「重新拉 13 KB 包 + 先看到中文」。 */
+  var hydrateCode = pref || navLang();
+  var cached = hydrateFromCache(hydrateCode);
+  var boot = function(){
+    if(cached.ok){
+      document.documentElement.setAttribute('lang', hydrateCode);
+      schedule(document.body);
+      applyTitle();
+    }
+    startObserver();
+    fetchJSON('/i18n/manifest').then(function(m){
+      var packs = (m && m.packs) || [];
+      var code = detectPref(packs);
+      renderMenu(packs, code);
+      if(code === SOURCE_LANG){
+        /* 包被删掉或改名：缓存还在的话，界面会停在一门服务器上已经不存在的
+         * 语言。清掉缓存并重载一次 —— 重载后 cached.ok 为假，不会再进这条。 */
+        if(cached.ok){ writeLS(PACK_CACHE, ''); location.replace(location.href); }
+        return null;
+      }
+      var want = 0;
+      for(var i = 0; i < packs.length; i++){
+        if(packs[i].code === code) want = packs[i].version || 0;
+      }
+      if(cached.ok && cached.version === want) return null;   // 缓存就是当前版
+      /* 缓存没了、版本变了，或 ?lang= 指了一个没缓存的语言 —— 才真的去取包。 */
+      return applyActive(code, want).then(function(ok){
+        /* 版本变了而页面已经用旧包涂过一遍：文本节点进了 seen 就不再翻，
+         * 就地换包只能得到新旧混排 —— 跟就地换语言是同一个毛病。缓存已经
+         * 写成新包了，所以重载一次即可；重载后版本已对齐，不会再进这个分支。 */
+        if(ok && cached.ok) location.replace(location.href);
+        return ok;
+      });
+    }).catch(function(){
+      renderMenu([], SOURCE_LANG);   // 拿不到清单也要有按钮，只是没有可选项
+    });
+  };
+  if(document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
+  else boot();
+
+  document.addEventListener('click', function(e){
+    var wrap = document.getElementById('langDropdownWrap');
+    var themeWrap = document.getElementById('themeDropdownWrap');
+    /* 点主题按钮也要收起语言菜单 —— 反过来已在 toggleLangMenu 里做了。
+     * 用「点到了另一个下拉的容器」而不是改主题块，保持主题脚本零改动。 */
+    var hitOther = themeWrap && themeWrap.contains(e.target);
+    if(hitOther || (wrap && !wrap.contains(e.target))){
+      var menu = document.getElementById('langDropdown');
+      if(menu && menu.classList.contains('open')) closeLangMenu();
+    }
+  });
+  document.addEventListener('keydown', function(e){
+    if(e.key === 'Escape') closeLangMenu();
+  });
+};
+window.initLangSystem();
+})();
+</script>
 </head>
 <body>
 <script>
@@ -1012,6 +1482,17 @@ window.QD_BASE_PREFIX = "/*__QD_PREFIX__*/";
     </nav>
   </div>
   <div class="header-right">
+    <!-- 复用主题下拉的 .theme-btn / .theme-dropdown / .theme-option：
+         零新增 CSS，[data-theme="dark"] 那批覆盖与 themePop 动画自动生效。
+         选项由 /i18n/manifest 在运行时渲染，这里不写死语言列表 —— 这才是
+         「丢一个 json 进 i18n/ 就多一门语言」的落点。 -->
+    <div class="theme-dropdown-wrap" id="langDropdownWrap">
+      <button type="button" class="theme-btn" id="langToggleBtn" onclick="toggleLangMenu(event)"
+              title="界面语言" aria-label="切换界面语言" aria-haspopup="true" aria-expanded="false">
+        <span id="langToggleIcon" class="theme-btn-icon"></span>
+      </button>
+      <div class="theme-dropdown" id="langDropdown" role="menu" aria-label="选择界面语言"></div>
+    </div>
     <div class="theme-dropdown-wrap" id="themeDropdownWrap">
       <button type="button" class="theme-btn" id="themeToggleBtn" onclick="toggleThemeMenu(event)" title="颜色主题" aria-label="切换颜色主题" aria-haspopup="true" aria-expanded="false">
         <span id="themeToggleIcon" class="theme-btn-icon"></span>
@@ -1154,6 +1635,7 @@ window.QD_BASE_PREFIX = "/*__QD_PREFIX__*/";
             <th style="text-align:center;width:160px">模型能力</th>
             <th style="text-align:center;width:130px">上下文窗口</th>
             <th style="text-align:left">思考档位</th>
+            <th style="text-align:center;width:130px">上下文设置</th>
           </tr>
         </thead>
         <tbody></tbody>
@@ -1441,6 +1923,15 @@ window.QD_BASE_PREFIX = "/*__QD_PREFIX__*/";
     <div class="insight-grid" id="insightCards"></div>
 
     <div class="insight-block">
+      <h2>全价请求 <em id="fullPriceHint"></em></h2>
+      <div id="fullPriceWrap"></div>
+    </div>
+
+    <div class="insight-block">
+      <h2>额度构成 <em id="creditCompHint"></em></h2>
+      <div id="creditCompWrap"></div>
+    </div>
+    <div class="insight-block">
       <h2>官方积分消耗 <em id="creditUsageHint"></em></h2>
       <div id="creditUsageWrap"></div>
     </div>
@@ -1573,6 +2064,26 @@ window.QD_BASE_PREFIX = "/*__QD_PREFIX__*/";
       </div>
     </section>
 
+
+    <section id="sectionToolEcho">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;flex-wrap:wrap;gap:10px">
+        <div>
+          <h2 style="margin:0">工具协议残片收尾 <em id="setToolEchoState"></em></h2>
+          <div style="font-size:12px;color:var(--dim);margin-top:4px;line-height:1.7">
+            有些模型（如 <code>Qwen3.8-Flash</code>）会把工具调用当正文吐出来（DSML 标记 + 半截参数）。
+            <b>strict</b>（默认）以 <code>response.failed</code> 收尾，客户端应看到错误并重试；
+            <b>lenient</b> 改为正常完成并保留已产出的正文 —— 用于「客户端收到 failed 后静默结束对话」的场景（Codex 实测）。
+            <br>lenient 是折中：那一轮没有工具调用，但对话不会断。上游修好后建议切回 strict。
+          </div>
+        </div>
+        <label style="display:flex;align-items:center;gap:8px;font-size:13px;white-space:nowrap">
+          <select id="setToolEcho" onchange="saveToolEchoMode(this.value)" style="font-size:12px;padding:4px 8px">
+            <option value="strict">strict（默认）</option>
+            <option value="lenient">lenient（容错）</option>
+          </select>
+        </label>
+      </div>
+    </section>
     <section id="sectionLimits">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;flex-wrap:wrap;gap:10px">
         <div>
@@ -2115,12 +2626,29 @@ async function loadUpdateState(force, btn){
       state.innerHTML = '发现新版本 <b style="color:var(--accent)">' + esc(r.latest) + '</b>'
         + '（当前 ' + esc(r.current) + '）';
       state.style.color = 'var(--accent)';
+      // issue #132：按钮是否渲染以 /update/plan 的 can_apply 为准 ——
+      // 「环境变量禁用 / 容器内 / 非本机访问」三种情况后端必然 403，
+      // 此前仍给一个按了就报错的按钮。
+      let plan = null;
+      try{ plan = await getJSON('/update/plan'); }catch(e){ plan = null; }
+      const canApply = !!(plan && plan.can_apply);
+      const why = ((plan && plan.apply_blocked_reasons) || []).filter(Boolean);
       if(actions){
-        actions.innerHTML = '<button class="sec" style="font-size:11px;padding:3px 10px;'
-          + 'margin-right:10px;background:var(--accent);color:#fff;border-color:var(--accent)" '
-          + 'onclick="applyUpdate(this)">一键更新</button>'
-          + (r.url ? ('<a href="' + esc(r.url) + '" target="_blank" rel="noopener" '
-          + 'style="color:var(--dim);text-decoration:underline">发布说明 →</a>') : '');
+        const releaseLink = r.url
+          ? ('<a href="' + esc(r.url) + '" target="_blank" rel="noopener" '
+             + 'style="color:var(--dim);text-decoration:underline">发布说明 →</a>')
+          : '';
+        if(canApply){
+          actions.innerHTML = '<button class="sec" style="font-size:11px;padding:3px 10px;'
+            + 'margin-right:10px;background:var(--accent);color:#fff;border-color:var(--accent)" '
+            + 'onclick="applyUpdate(this)">一键更新</button>' + releaseLink;
+        } else {
+          // 必然失败的动作不给按钮：直接说清原因 + 给手动路径
+          actions.innerHTML = '<span style="font-size:11px;color:var(--warn)">'
+            + esc(why.length ? ('无法一键更新：' + why.join('；')) : '无法一键更新')
+            + '</span> <span style="font-size:11px;color:var(--dim)">'
+            + '（可手动：下载新 release 覆盖安装目录后重启进程）</span> ' + releaseLink;
+        }
       }
       setUpdateBadge(r);      // 顶部徽标提醒升级
     } else {
@@ -2264,7 +2792,7 @@ function renderAvailableModels(){
     countEm.textContent = '(共 ' + MODELS_DATA.length + ' 个 · 开放 ' + openN + ' 个)';
   }
   if(!MODELS_DATA.length){
-    tb.innerHTML = '<tr><td colspan="5" class="empty">暂无可用模型</td></tr>';
+    tb.innerHTML = '<tr><td colspan="6" class="empty">暂无可用模型</td></tr>';
     return;
   }
   tb.innerHTML = MODELS_DATA.map(m => {
@@ -2414,12 +2942,30 @@ function renderAvailableModels(){
       idLines.push('<div style="margin-top:2px;font-size:11px;color:var(--dim);line-height:1.45" title="'
         + esc(m.description) + '">' + esc(m.description) + '</div>');
     }
+    // 6. 上下文设置（issue #106）：官方 context_config 档位下拉；选中值发往网关
+    //    settings.model_context，build_qoder_body 按它抬 max_input_tokens。
+    const ctxKey = (m.upstream_key && m.upstream_key !== m.id)
+      ? m.upstream_key : m.id;
+    const ctxLabels = (m.context_window_labels && m.context_window_labels.length)
+      ? m.context_window_labels : (m.context_windows || []);
+    const ctxCur = String((window.SETTINGS_MODEL_CONTEXT || {})[ctxKey]
+      || (window.SETTINGS_MODEL_CONTEXT || {})[m.id] || '');
+    const ctxSel = ctxLabels.length
+      ? '<select class="ctx-select" data-model="' + esc(ctxKey) + '"'
+        + ' onchange="saveModelContext(this.dataset.model, this.value)">'
+        + '<option value="">默认' + (m.context_window_default
+            ? (' (' + esc(m.context_window_default) + ')') : '') + '</option>'
+        + ctxLabels.map(l => '<option value="' + esc(l) + '"' + (ctxCur === String(l) ? ' selected' : '') + '>'
+            + esc(l) + '</option>').join('')
+        + '</select>'
+      : '<span style="color:var(--dim)">—</span>';
     return '<tr>'
       + '<td style="text-align:left">' + idLines.join('') + '</td>'
       + '<td style="text-align:center">' + credBadge + '</td>'
       + '<td style="text-align:center">' + capHtml + '</td>'
       + '<td style="text-align:center">' + ctx + '</td>'
       + '<td style="text-align:left">' + effort + '</td>'
+      + '<td style="text-align:center">' + ctxSel + '</td>'
       + '</tr>';
   }).join('');
 }
@@ -2450,10 +2996,24 @@ async function loadVmState(force){
       : '本机虚拟化检测';
     const ev = document.getElementById("vmEvidence");
     if(ev){
+      // issue #123 后续：两个来源分开写，避免「本地：单板计算机」与
+      // 「官方风控：KVM」并排出现时看起来自相矛盾。
       const lines = [];
-      if(r.score !== null && r.score !== undefined) lines.push('风控评分 ' + r.score + '/100');
-      if(r.source === 'local') lines.push('官方风控桥不可用，以下为本机交叉校验');
-      (r.evidence || []).slice(0, 3).forEach(function(x){ lines.push(String(x)); });
+      const localLine = (r.local_evidence || r.evidence || [])
+        .filter(function(x){ return String(x).indexOf('单板计算机') === 0; })[0];
+      if(localLine) lines.push('本地硬件：' + String(localLine).replace('检测到', ''));
+      const bi = r.bridge_vm_info || {};
+      if(bi.isVm !== undefined && bi.isVm !== null){
+        lines.push('官方风控：' + (bi.isVm ? '判定为虚拟机' : '判定为物理机')
+          + (bi.brand ? ' · ' + String(bi.brand) : '')
+          + (bi.percentage !== undefined && bi.percentage !== null ? ' · 评分 ' + bi.percentage : '')
+          + (bi.vmTypeCode !== undefined && bi.vmTypeCode !== null ? ' · 类型码 ' + bi.vmTypeCode : ''));
+      } else if(r.bridge_available === false){
+        lines.push('官方风控：桥不可用（本机未找到 runtime-info），以下为本机交叉校验');
+      }
+      (r.evidence || []).slice(0, 3).forEach(function(x){
+        if(String(x).indexOf('单板计算机') !== 0) lines.push(String(x));
+      });
       ev.innerHTML = lines.map(esc).join('<br>');
     }
     const card = document.getElementById("cardVmState");
@@ -2831,6 +3391,134 @@ let INSIGHT_SIG = "";
 // 官方积分消耗（0.4.3 客户端新增接口 /accounts/credits/usage）：累计 + 峰值日 + 365 天热力图
 let CREDIT_USAGE_SIG = "";
 let CREDIT_USAGE_AT = 0;
+// issue #129 后续：把「缓存为 0 的超长 prompt」单独拎出来 —— 它是最容易被忽略的成本项
+function renderFullPrice(fp){
+  const box = document.getElementById("fullPriceWrap");
+  const hint = document.getElementById("fullPriceHint");
+  if(!box) return;
+  const n = Number((fp && fp.requests) || 0);
+  const credit = Number((fp && fp.credit) || 0);
+  const share = (fp && fp.credit_share != null) ? fp.credit_share : null;
+  const th = (fp && fp.threshold) || 100000;
+  if(hint){
+    hint.textContent = n ? ("（" + n + " 次）") : "（无）";
+  }
+  if(!n){
+    box.innerHTML = '<div class="empty">当前窗口没有「缓存为 0 的超长请求」——前缀复用良好</div>';
+    return;
+  }
+  const pct = share == null ? "—" : (share + "%");
+  box.innerHTML = '<div class="insight-hero" style="margin-bottom:10px">'
+    + '<div><div style="font-size:26px;font-weight:800;color:#e08b2b">' + n + '<span style="font-size:13px;font-weight:600;color:var(--dim)"> 次</span></div>'
+    + '<div style="font-size:11px;color:var(--dim);margin-top:2px">输入 ≥ ' + fmt(th) + ' 且缓存命中为 0</div></div>'
+    + '<div style="text-align:right"><div style="font-size:18px;font-weight:700;color:var(--accent2)">' + credit.toFixed(2) + ' 积分</div>'
+    + '<div style="font-size:11px;color:var(--dim);margin-top:2px">占窗口积分 ' + pct + '</div></div></div>'
+    + '<div class="legend"><span>这类请求按<b>全价</b>计费：换前缀（改系统提示/工具清单）、新开会话、或压缩历史后首轮最容易命中。'
+    + '想降成本就保持前缀稳定，并让长会话走压缩而不是重开。</span></div>';
+}
+// issue #141：额度构成（套餐内 / 资源包 / SOTA / 共享池）+ 端点自动探测
+let CREDITS_COMP_SIG = null;
+function compSum(list, kind){
+  return (list || []).filter(b => (b.kind || "") === kind)
+    .reduce((s, b) => s + Number(b.remain || 0), 0);
+}
+function compExpiry(list){
+  const ts = (list || []).map(b => Number(b.expires_at || 0)).filter(x => x > 0);
+  if(!ts.length) return "";
+  const soon = Math.min.apply(null, ts);
+  const d = new Date(soon * 1000);
+  return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-"
+    + String(d.getDate()).padStart(2, "0");
+}
+async function loadCreditsComposition(force){
+  const box = document.getElementById("creditCompWrap");
+  if(!box) return;
+  let d = null;
+  try{ d = await getJSON("/credits/summary"); }catch(e){ d = null; }
+  if(!d || !d.accounts || !d.accounts.length){
+    box.innerHTML = '<div class="stat-empty">还没有可用的账号</div>';
+    return;
+  }
+  const sig = JSON.stringify(d.accounts.map(a => [a.uid, a.credits_remain,
+    (a.composition || []).map(b => [b.kind, b.remain, b.size, b.expires_at])]));
+  if(!force && sig === CREDITS_COMP_SIG) return;
+  CREDITS_COMP_SIG = sig;
+  const rows = d.accounts.map(a => {
+    const comp = a.composition || [];
+    const plan = compSum(comp, "plan");
+    const pack = compSum(comp, "pack");
+    const sota = compSum(comp, "sota");
+    const shared = compSum(comp, "shared");
+    const exp = compExpiry(comp);
+    const src = (a.source || "").replace(/^https?:\/\//, "");
+    const num = v => v ? fmt(Math.round(v)) : '<span style="color:var(--dim)">0</span>';
+    return '<tr><td>' + esc(a.nickname || a.uid || "") + '</td>'
+      + '<td style="text-align:center">' + esc(a.realm || "") + '</td>'
+      + '<td style="text-align:right">' + num(plan) + '</td>'
+      + '<td style="text-align:right">' + num(pack) + '</td>'
+      + '<td style="text-align:right">' + num(sota) + '</td>'
+      + '<td style="text-align:right">' + (shared ? num(shared) : '<span style="color:var(--dim)">—</span>') + '</td>'
+      + '<td style="text-align:right"><b style="color:var(--accent2)">'
+        + fmt(Math.round(a.credits_remain_effective || a.credits_remain || 0)) + '</b></td>'
+      + '<td style="color:var(--dim)">' + (exp ? esc(exp) : "—") + '</td>'
+      + '<td style="color:var(--dim);font-size:11px">' + (src ? esc(src) : "未探测") + '</td></tr>';
+  }).join("");
+  box.innerHTML = '<div class="stat-panel-sub" style="margin:0 0 8px">'
+    + '按「官方返回的额度容器」拆开：<b>套餐内</b>（userQuota/plan）/ <b>资源包</b>（addOnQuota/packages）/ '
+    + '<b>SOTA 专属</b> / <b>共享池</b>（组织级）。来源端点一栏是本次取数实际用的 URL —— '
+    + 'INTL 与 CN 不是同一套，网关会自动探测并记住。'
+    + ' <button class="sec" style="font-size:11px;padding:2px 8px" onclick="probeCredits(this)">自动探测</button></div>'
+    + '<div class="table-wrap"><table class="insight-table"><thead><tr>'
+    + '<th>账号</th><th style="text-align:center">区域</th>'
+    + '<th style="text-align:right">套餐内</th><th style="text-align:right">资源包</th>'
+    + '<th style="text-align:right">SOTA</th><th style="text-align:right">共享池</th>'
+    + '<th style="text-align:right">剩余</th><th>最近到期</th><th>来源端点</th>'
+    + '</tr></thead><tbody>' + rows + '</tbody></table></div>';
+}
+async function probeCredits(btn){
+  if(btn){ btn.disabled = true; btn.textContent = "探测中…"; }
+  // issue：探测要按候选逐个打上游，慢的时候浏览器先掐断（Failed to fetch）。
+  // 用 AbortController 给 100s 预算，并把「超时/网络中断」与「404 老网关」分开提示。
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 100000);
+  try{
+    const resp = await fetch("/credits/probe", {method:"POST",
+        headers: authHeaders({"Content-Type":"application/json"}),
+        body: JSON.stringify({limit: 4}), signal: ctrl.signal});
+    const text = await resp.text();
+    let r = {};
+    try{ r = text ? JSON.parse(text) : {}; }catch(e){ r = {raw: text}; }
+    if(!resp.ok){
+      const m = (r && r.error && r.error.message) || ("HTTP " + resp.status);
+      throw new Error(m);
+    }
+    const hits = (r.results || []).filter(x => x.ok);
+    const first = hits[0] && hits[0].hit;
+    if(first){
+      toast("探测成功：使用 " + String(first.host).replace(/^https?:\/\//, "") + first.path, "ok");
+    } else {
+      const rows = (r.results || []).flatMap(x => x.rows || []);
+      const codes = {};
+      rows.forEach(row => { const k = row.status; codes[k] = (codes[k] || 0) + 1; });
+      const summary = Object.keys(codes).map(k => k + "×" + codes[k]).join(" ");
+      toast("没有端点返回可识别的额度字段（候选结果：" + (summary || "无") + "），见网关日志", "warn");
+    }
+    await loadCreditsComposition(true);
+  }catch(e){
+    const msg = String((e && e.message) || e);
+    if(e && e.name === "AbortError"){
+      toast("探测超时（>100s）：先试试只探测已知端点 GET /credits/probe?limit=3", "warn");
+    } else if(/not found/i.test(msg)){
+      toast("当前网关版本不支持额度探测（需升级到 1.7.27+ 并重启网关）", "warn");
+    } else if(/Failed to fetch|NetworkError|load failed/i.test(msg)){
+      toast("请求被中断（网关可能仍在探测）：稍等几秒再点一次，或直接打开 /credits/probe?limit=3 查看", "warn");
+    } else {
+      toast("探测失败: " + msg, "bad");
+    }
+  }
+  finally { clearTimeout(timer); if(btn){ btn.disabled = false; btn.textContent = "自动探测"; } }
+}
+
 async function loadCreditUsage(force){
   if(!force && Date.now() - CREDIT_USAGE_AT < 60000) return;
   CREDIT_USAGE_AT = Date.now();
@@ -3527,6 +4215,32 @@ function accountRow(a){
       '已用 ' + fmt(cred.shared.used) + ' · 总量 ' + fmt(cred.shared.size) + '">共享 ' +
       fmt(cred.shared.remain) + '</span>'
     : '';
+  // issue #141 后续：额度构成就贴在该账号的积分旁边（不再要求去别处看）
+  let compLine = '';
+  if(cred && Array.isArray(cred.composition) && cred.composition.length){
+    const part = {};
+    cred.composition.forEach(b => {
+      const k = b.kind || "pack";
+      part[k] = (part[k] || 0) + Number(b.remain || 0);
+    });
+    const bits = [];
+    if(part.plan) bits.push("套餐内 " + fmt(part.plan));
+    if(part.pack) bits.push("资源包 " + fmt(part.pack));
+    if(part.sota) bits.push("SOTA " + fmt(part.sota));
+    if(part.shared) bits.push("共享 " + fmt(part.shared));
+    const exps = cred.composition.map(b => Number(b.expires_at || 0)).filter(x => x > 0);
+    let expTxt = "";
+    if(exps.length){
+      const d = new Date(Math.min.apply(null, exps) * 1000);
+      expTxt = " · 最近到期 " + d.getFullYear() + "-"
+        + String(d.getMonth() + 1).padStart(2, "0") + "-"
+        + String(d.getDate()).padStart(2, "0");
+    }
+    const srcTip = cred.source ? ("\n取数端点：" + cred.source) : "";
+    compLine = '<div class="mono" style="font-size:10px;color:var(--dim);margin-top:1px" title="'
+      + esc("额度构成（上游返回的容器）" + srcTip) + '">'
+      + esc(bits.join(" · ") + expTxt) + '</div>';
+  }
   // issue #40 后续：上游返回「全 0 退化体」时不再一片空白——显示 0* 并说明原因
   const degraded = a.creditsDegraded || null;
   const credText = cred
@@ -3562,7 +4276,7 @@ function accountRow(a){
     + '<td style="text-align:center">' + state + _ckOff + '</td>'
     + '<td style="text-align:center;white-space:nowrap">' + accountGuardBadge(a) + '</td>'
     + '<td style="text-align:left;white-space:nowrap">' + credText
-    +   creditsDeltaChip(a) + freshLine + '</td>'
+    +   creditsDeltaChip(a) + compLine + freshLine + '</td>'
     + '<td style="text-align:right">' + fmt(usage.requests) + '</td>'
     + '<td style="text-align:right">' + fmt(usage.total_tokens) + '</td>'
     + '<td style="text-align:right">' + fmt(usage.cached_tokens) + '</td>'
@@ -3616,6 +4330,83 @@ async function setCheckinWhenDisabled(uid, value){
   }catch(e){ toast("设置失败: " + e.message, "bad"); }
 }
 
+// ---- 账号表排序（issue #111）：点表头升序 → 降序 → 默认（存 localStorage）----
+const ACCT_SORT_STORE = "qd-acct-sort";
+let ACCT_SORT = (function(){
+  try{
+    const raw = JSON.parse(localStorage.getItem(ACCT_SORT_STORE) || "{}");
+    const key = typeof raw.key === "string" ? raw.key : "";
+    return { key: key, dir: raw.dir === -1 ? -1 : 1 };
+  }catch(e){ return { key: "", dir: 1 }; }
+})();
+
+function sortAccounts(key, ev){
+  const k = (key === "credits" && ev && ev.shiftKey) ? "used" : key;
+  if(ACCT_SORT.key !== k){ ACCT_SORT = { key: k, dir: 1 }; }      // 新列：升序
+  else if(ACCT_SORT.dir === 1){ ACCT_SORT = { key: k, dir: -1 }; } // 再点：降序
+  else { ACCT_SORT = { key: "", dir: 1 }; }                        // 三下：回默认顺序
+  try{ localStorage.setItem(ACCT_SORT_STORE, JSON.stringify(ACCT_SORT)); }catch(e){}
+  renderAccounts();
+}
+
+function acctSortValue(a, key){
+  const usage = USAGE_BY_ACCOUNT[a.uid] || {};
+  switch(key){
+    case "realm":    return a.realm === "cn" ? 0 : 1;
+    case "name":     return String(a.nickname || a.uid || "").trim();
+    // 状态排序口径：可用 → 异常 → 冷却 → 停用 → 过期（越靠前越"能打"）
+    case "state":    return !a.enabled ? 3
+                        : a.expiresIn === "expired" ? 4
+                        : a.inCooldown ? 2
+                        : a.lastError ? 1 : 0;
+    // 两种额度口径：点击=剩余，Shift+点击=已用（issue #111）
+    case "credits":  return a.credits ? Number(a.credits.remain) : null;
+    case "used":     return a.credits ? (Number(a.credits.size) - Number(a.credits.remain)) : null;
+    case "requests": return Number(usage.requests || 0);
+    case "tokens":   return Number(usage.total_tokens || 0);
+    case "cached":   return Number(usage.cached_tokens || 0);
+  }
+  return null;
+}
+
+function sortAccountList(list){
+  const st = ACCT_SORT;
+  if(!st.key) return list;                       // 默认：保持后端给的顺序
+  const missing = v => (v === null || v === undefined
+    || (typeof v === "number" && !isFinite(v)));
+  const nameOf = a => String(a.nickname || a.uid || "");
+  const cmpName = (x, y) => nameOf(x).localeCompare(
+    nameOf(y), "zh-Hans-CN", { numeric: true, sensitivity: "base" });
+  const out = list.slice();
+  out.sort(function(x, y){
+    const vx = acctSortValue(x, st.key), vy = acctSortValue(y, st.key);
+    const nx = missing(vx), ny = missing(vy);
+    // 取不到值的一律沉底（额度查询失败那种不能当 0 插在中间）
+    if(nx && ny) return cmpName(x, y);
+    if(nx) return 1;
+    if(ny) return -1;
+    let r;
+    if(typeof vx === "string" || typeof vy === "string"){
+      r = String(vx).localeCompare(String(vy), "zh-Hans-CN",
+        { numeric: true, sensitivity: "base" });     // 自然序：Z Z2 < Z Z10
+    } else {
+      r = vx - vy;
+    }
+    if(r === 0) r = cmpName(x, y);                    // 同值保持可预期顺序
+    return r * (st.dir === -1 ? -1 : 1);
+  });
+  return out;
+}
+
+function sortTh(key, label, style, title){
+  const cur = ACCT_SORT.key === key
+    || (key === "credits" && ACCT_SORT.key === "used");
+  const ind = cur ? (ACCT_SORT.dir === -1 ? " ▼" : " ▲") : "";
+  return '<th class="sortable' + (cur ? " sorted" : "") + '" style="' + style
+    + '" title="' + (title || "点击排序：升序 → 降序 → 恢复默认")
+    + '" onclick="sortAccounts(\'' + key + '\', event)">'
+    + label + '<span class="sort-ind">' + ind + "</span></th>";
+}
 function renderAccounts(){
   const box = document.getElementById('accounts');
   const currentView = (window.VIEW_REALM || "intl");
@@ -3628,6 +4419,7 @@ function renderAccounts(){
       String(a.organizationName || "").toLowerCase().includes(_q) ||
       String(a.note || "").toLowerCase().includes(_q)));
   }
+  list = sortAccountList(list);          // issue #111：表头排序（默认顺序 = 后端原序）
   const usable = list.filter(a => a.enabled).length;
   const viewName = currentView === 'cn' ? '国内版' : '国际版';
   document.getElementById('acctCount').textContent =
@@ -3651,17 +4443,21 @@ function renderAccounts(){
   }
   box.innerHTML = '<table><thead><tr>'
   box.innerHTML = '<div class="table-wrap"><table><thead><tr>'
-    + '<th style="text-align:center;width:76px">版本</th>'
-    + '<th style="text-align:left">账号</th>'
-    + '<th style="text-align:center;width:84px">状态</th>'
+    + sortTh("realm", "版本", "text-align:center;width:76px")
+    + sortTh("name", "账号", "text-align:left",
+             "点击按账号名/UID 自然序排序（Z Z2 排在 Z Z10 前）：升序 → 降序 → 默认")
+    + sortTh("state", "状态", "text-align:center;width:84px",
+             "按可用程度排序：可用 → 异常 → 冷却 → 停用 → 过期")
     + '<th style="text-align:center;width:96px">护栏</th>'
-    + '<th style="text-align:left;width:120px">积分</th>'
-    + '<th style="text-align:right;width:70px">请求</th>'
-    + '<th style="text-align:right;width:88px">总 token</th>'
-    + '<th style="text-align:right;width:80px">缓存</th>'
+    + sortTh("credits", "积分", "text-align:left;width:120px",
+             "点击按剩余额度排序；Shift+点击按已用额度。取额度失败的账号始终沉底")
+    + sortTh("requests", "请求", "text-align:right;width:70px")
+    + sortTh("tokens", "总 token", "text-align:right;width:88px")
+    + sortTh("cached", "缓存", "text-align:right;width:80px")
     + '<th style="text-align:center;width:150px">操作</th>'
     + '</tr></thead><tbody>' + list.map(accountRow).join('') + '</tbody></table></div>'
-    + '<div class="legend"><span>多个账号按会话粘性 + 轮询使用；某个账号被上游拒绝时自动切到下一个</span></div>';
+    + '<div class="legend"><span>多个账号按会话粘性 + 轮询使用；某个账号被上游拒绝时自动切到下一个'
++ ' · 点击表头排序（再次点击反向，第三次恢复默认；Shift+点击「积分」按已用额度）</span></div>';
 }
 
 async function loadAccounts(){
@@ -3732,7 +4528,12 @@ async function testAccount(uid, btn){
     if(r.ok){
       toast('测试通过 (' + r.elapsed_ms + 'ms) [' + r.model + ']: ' + (r.reply || '正常'), 'ok');
     } else {
-      toast('测试失败: ' + (r.error || r.status || '异常'), 'bad');
+      // issue #134：后端已给人话 hint（额度耗尽 / 上游排队 / 凭证过期…），
+      // 以前只显示上游原文，用户得自己从 JSON 里读码。这里 hint 优先。
+      const _head = r.hint ? (r.hint + '  ') : '';
+      const _tail = r.hint ? ('（' + (r.error || r.status || '异常') + '）')
+                           : (r.error || r.status || '异常');
+      toast('测试失败: ' + _head + _tail, 'bad');
     }
     await loadAccounts();
   }catch(e){
@@ -4221,6 +5022,88 @@ function effortCell(r){
   return '<span class="badge warn" title="请求 ' + esc(req) + '，实际下发 ' + esc(eff) + '：归一化时被挪档">' + mono(req) + ' → ' + mono(eff) + '</span>';
 }
 
+// issue #129 后续：积分三段拆分单元格（非缓存输入 / 缓存输入 / 输出）
+function creditSplitCell(r){
+  const sp = r.credit_split;
+  if(r.error || !sp) return '<span style="color:var(--dim)">—</span>';
+  const fmtPart = v => {
+    const n = Number(v || 0);
+    if(!n) return '<span style="color:var(--dim)">0</span>';
+    return n >= 100 ? n.toFixed(0) : (n >= 1 ? n.toFixed(1) : n.toFixed(2));
+  };
+  const total = Number(sp.input || 0) + Number(sp.cached || 0) + Number(sp.output || 0);
+  // 缓存字段缺失时缓存段标 ?，避免把「没有数据」读成「零命中」
+  const cachedKnown = r.cached_reported !== false;
+  const cacheTxt = cachedKnown ? fmtPart(sp.cached)
+    : '<span style="color:var(--dim)" title="上游没有回报缓存字段，缓存段无法折算">?</span>';
+  const nominal = (r.billable === false);
+  const style = nominal ? 'opacity:.62;font-style:italic' : '';
+  return '<span style="' + style + '" title="' + esc(
+      (nominal ? '名义成本（上游标记为不计费）' : '实际扣费') +
+      '：非缓存输入 ' + (sp.input || 0) + ' + 缓存输入 ' + (sp.cached || 0) +
+      ' + 输出 ' + (sp.output || 0) + ' = ' + total.toFixed(2) + ' 积分') + '">'
+    + '<span style="color:#e08b2b">' + fmtPart(sp.input) + '</span>'
+    + '<span style="color:var(--dim)">+</span>' + '<span style="color:#26bb82">' + cacheTxt + '</span>'
+    + '<span style="color:var(--dim)">+</span>' + '<span style="color:var(--think)">' + fmtPart(sp.output) + '</span>'
+    + (nominal ? '<span style="font-size:9px;color:var(--dim);margin-left:3px">名义</span>' : '')
+    + '</span>';
+}
+// issue #129：每次调用的积分消耗可视化
+function creditCell(r){
+  if(r.error) return '<span style="color:var(--dim)">—</span>';
+  const c = Number(r.credit || 0);
+  const orig = Number(r.original_credits || 0);
+  if(!c && !orig) return '<span style="color:var(--dim)">0</span>';
+  const shown = (c || orig);
+  const txt = shown >= 100 ? shown.toFixed(0) : shown.toFixed(2);
+  // 有折扣（original_credits > credit）时把原价划掉，避免「怎么这么贵」的误读
+  const disc = (orig > c + 1e-9)
+    ? ' <span style="font-size:10px;color:var(--dim);text-decoration:line-through">'
+      + (orig >= 100 ? orig.toFixed(0) : orig.toFixed(2)) + '</span>'
+    : '';
+  const color = shown >= 100 ? 'color:#e08b2b' : 'color:var(--accent2)';
+  return '<b style="' + color + '">' + txt + '</b>' + disc;
+}
+
+function creditTitle(r){
+  const c = Number(r.credit || 0), orig = Number(r.original_credits || 0);
+  const parts = ['本次扣费 ' + c + ' 积分'];
+  if(orig > c + 1e-9) parts.push('原价 ' + orig + '（当前有折扣/谷时价）');
+  if(r.billable === false) parts.push('上游标记为不计费');
+  return parts.join(' · ');
+}
+
+function recentCreditSummary(rows){
+  let sum = 0, sumOrig = 0, n = 0;
+  (rows || []).forEach(function(r){
+    if(r.error) return;
+    const c = Number(r.credit || 0), o = Number(r.original_credits || 0);
+    sum += c; sumOrig += (o > c ? o : c); n += 1;
+  });
+  if(!n) return '';
+  const disc = sumOrig > sum + 1e-9
+    ? '（原价 <span style="text-decoration:line-through">' + sumOrig.toFixed(2) + '</span>）'
+    : '';
+  // issue #129 后续：合计也按三段拆开，整页成本落在哪一段一目了然
+  let part = { input: 0, cached: 0, output: 0 };
+  (rows || []).forEach(function(r){
+    const sp = r.credit_split;
+    if(!sp) return;
+    part.input += Number(sp.input || 0);
+    part.cached += Number(sp.cached || 0);
+    part.output += Number(sp.output || 0);
+  });
+  const splitTxt = '<span style="color:#e08b2b">输入 ' + part.input.toFixed(1) + '</span>'
+    + ' <span style="color:var(--dim)">+</span> '
+    + '<span style="color:#26bb82">缓存 ' + part.cached.toFixed(1) + '</span>'
+    + ' <span style="color:var(--dim)">+</span> '
+    + '<span style="color:var(--think)">输出 ' + part.output.toFixed(1) + '</span>';
+  return '<div class="legend" style="margin-top:6px"><span>本页 ' + n + ' 次调用合计 '
+    + '<b style="color:var(--accent2)">' + sum.toFixed(2) + '</b> 积分' + disc
+    + '（拆分：' + splitTxt + '）'
+    + '；单次扣费按积分列（鼠标悬停看明细）</span></div>';
+}
+
 async function refreshInner(){
   let usage, recent, perf;
   try{
@@ -4302,10 +5185,11 @@ async function refreshInner(){
   const countEl = document.getElementById('recentCount');
   if(countEl) countEl.textContent = '(第 ' + RECENT_PAGE + ' 页 / 共 ' + fmt(total) + ' 条)';
   document.getElementById('recent').innerHTML = rows.length ?
-    '<table><thead><tr><th>时间</th><th>模型</th><th>账号</th><th style="text-align:left">Key</th><th style="text-align:left">档位</th><th style="text-align:center;width:72px">区域</th><th>模式</th><th>耗时</th><th>首字</th><th>速度</th><th>输入</th><th>输出</th><th>思考</th><th>缓存</th><th>总 token</th></tr></thead><tbody>'
+    '<table><thead><tr><th>时间</th><th>模型</th><th>账号</th><th style="text-align:left">Key</th><th style="text-align:left">档位</th><th style="text-align:center;width:72px">区域</th><th>模式</th><th>耗时</th><th>首字</th><th>速度</th><th>输入</th><th>输出</th><th>思考</th><th>缓存</th><th>总 token</th><th style="text-align:right;width:84px">积分</th><th style="text-align:right;width:150px" title="按 token 折算的三段贡献：非缓存输入 + 缓存输入 + 输出；斜体「名义」表示上游标记为不计费">积分拆分</th></tr></thead><tbody>'
     + rows.map(r => '<tr>'
         + '<td class="mono">' + esc((r.iso||'').replace('T',' ').slice(5)) + '</td>'
-        + '<td class="mono">' + esc(r.model) + '</td>'
+        + '<td class="mono">' + esc(r.model)
+        + '</td>'
         + '<td class="mono" style="font-size:11px;color:var(--dim)">' + esc((r.account||'—').slice(0,8)) + '</td>'
         + '<td style="text-align:left">' + keyCell(r) + '</td>'
         + '<td style="text-align:left;white-space:nowrap">' + effortCell(r) + '</td>'
@@ -4319,7 +5203,10 @@ async function refreshInner(){
         + '<td style="color:var(--think)">' + fmt(r.reasoning_tokens) + '</td>'
         + '<td>' + (r.cache_hit_pct!=null ? r.cache_hit_pct+'%' : '—') + '</td>'
         + '<td><b>' + fmt(r.total_tokens) + '</b></td>'
+        + '<td style="text-align:right" title="' + esc(creditTitle(r)) + '">' + creditCell(r) + '</td>'
+        + '<td style="text-align:right;white-space:nowrap;font-size:11px">' + creditSplitCell(r) + '</td>'
       + '</tr>').join('') + '</tbody></table>'
+      + recentCreditSummary(rows)
     : '<div class="empty">还没有请求记录</div>';
   renderEffortByKey();   // 样本变了就重算档位分布
   renderRealmActual();   // #26：卡片「最近一次对话的出口」也读这批 usage 行（不再依赖响应头）
@@ -4507,11 +5394,30 @@ async function startDashboard(){
   ];
 }
 
+async function saveModelContext(model, label){
+  try{
+    const r = await postJSON('/settings/model-context', {model: model, label: label});
+    window.SETTINGS_MODEL_CONTEXT = r.model_context || {};
+    renderAvailableModels();
+    toast(label ? ('上下文已设为 ' + label + '（立即生效，新请求起）')
+               : '已恢复官方默认上下文', 'ok');
+  }catch(e){ toast('保存失败: ' + e.message, 'bad'); }
+}
+
 async function loadSettings(showToast){
   try {
     const data = await getJSON('/settings');
+    // issue #106：模型上下文档缓存给模型库表用（保存后也走这份）
+    window.SETTINGS_MODEL_CONTEXT = data.model_context || {};
     const wtBox = document.getElementById('setWebTools');
     if(wtBox) wtBox.checked = data.web_tools === true;
+    // issue #135：工具协议残片收尾策略回显（环境变量优先时给出提示）
+    const teBox = document.getElementById("setToolEcho");
+    const teState = document.getElementById("setToolEchoState");
+    if(teBox) teBox.value = data.tool_echo_mode || "strict";
+    if(teState) teState.textContent = data.tool_echo_mode_env
+      ? ("（由环境变量固定为 " + data.tool_echo_mode_env + "）")
+      : ("（" + (data.tool_echo_mode || "strict") + "）");
     const wtState = document.getElementById('setWebToolsState');
     if(wtState) wtState.textContent = data.web_tools ? '(已开启)' : '(已关闭)';
     const pwdState = document.getElementById('setPwdState');
@@ -4560,6 +5466,14 @@ async function loadSettings(showToast){
 
 
 // 本地 web 工具开关（唯一由模型驱动出网的能力，默认关闭）
+async function saveToolEchoMode(mode){
+  try{
+    const r = await postJSON("/settings/tool-echo-mode", {mode: mode});
+    toast("已切换为 " + (r.effective || mode) + "（立即生效）", "ok");
+    const st = document.getElementById("setToolEchoState");
+    if(st) st.textContent = "(" + (r.effective || mode) + ")";
+  }catch(e){ toast("保存失败: " + e.message, "bad"); }
+}
 async function saveWebTools(el){
   const on = !!(el && el.checked);
   el.disabled = true;
@@ -4856,6 +5770,11 @@ async function saveApiKeys(btn){
     // Blank means "keep the stored key", which the server honours per row.
     key: (row.key || '').trim(),
     note: (row.note || '').trim(),
+    // issue #131-1：白名单必须随载荷回去 —— 少了它服务端只能按「没提交」
+    // 处理（会保留旧值），但显式清空就再也做不到了；带上才能区分两者。
+    // 没有该字段时 JSON 序列化会直接丢掉它 -> 服务端按「未提交」保留旧值；
+    // 只有真的加载过白名单的行才会显式提交（含空数组=清除限制）。
+    models: Array.isArray(row.models) ? row.models.slice() : undefined,
   }));
   const newRow = API_KEY_ROWS.find(row => !row.masked && !(row.key || '').trim());
   if(newRow){
@@ -6351,7 +7270,10 @@ async function loadAnalytics(force){
     }
   }catch(e){ /* 样本取不到不影响主看板 */ }
   loadQuality();
+  try{ renderFullPrice(statData && statData.full_price); }
+  catch(e){ /* 全价请求卡失败不影响主看板 */ }
   try{ loadCreditUsage(!!force); }catch(e){ /* 官方积分消耗失败不影响主看板 */ }
+  try{ loadCreditsComposition(false); }catch(e){ /* 额度构成失败不影响主看板 */ }
 }
 
 function renderStats(d){
