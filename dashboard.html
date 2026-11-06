@@ -982,6 +982,14 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--accent);
 })();
 </script>
 <script>
+/* ---- 挂载前缀（Path Prefix Rewrite）----
+   服务端渲染看板时把 JSON 字面量替换进 QD_BASE_PREFIX（"" = 未挂载）。
+   所有面板请求经主块里的 api_url() 拼前缀：反代把 /qoder/* 整段转过来时，
+   绝对路径 fetch("/settings") 会被浏览器解析到站点根，前缀丢失 → 404。
+   放进 i18n 块（blocks[1]）而不是独立第四块：块顺序是既有契约
+   （tests/_test_dashboard_full_load.js 钉死 主题/i18n/主块 三块）。 */
+window.QD_BASE_PREFIX = "/*__QD_PREFIX__*/";
+
 /* i18n 层。拆成三块放在同一个 <script> 里，是为了让「纯查找核」能被
  * tests/_test_i18n_core.js 按锚点切出来在 node 里直接 eval —— 它不碰 DOM，
  * 所以四级兜底语义（尤其是「查不到就原样返回中文」）可以脱离浏览器断言。
@@ -1444,13 +1452,6 @@ window.initLangSystem();
 </script>
 </head>
 <body>
-<script>
-/* ---- 挂载前缀（Path Prefix Rewrite）----
-   服务端渲染看板时把 JSON 字面量替换进 QD_BASE_PREFIX（"" = 未挂载）。
-   所有面板请求必须经 api_url() 拼前缀：反代把 /qoder/* 整段转过来时，
-   绝对路径 fetch("/settings") 会被浏览器解析到站点根，前缀丢失 → 404。 */
-window.QD_BASE_PREFIX = "/*__QD_PREFIX__*/";
-</script>
 <header>
   <div class="header-left" style="display:flex;align-items:center;gap:18px;flex-wrap:wrap">
     <h1><span class="dot" id="statusDot"></span>Qoder 网关看板
